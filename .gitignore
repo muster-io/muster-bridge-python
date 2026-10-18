@@ -1,0 +1,12 @@
+# Build output, virtual environments, caches, coverage data and conformance runs
+/bin/
+/dist/
+/.venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+/.coverage
+/.coverage.*
+# Local, unpublished files of the maintainer
+CLAUDE.local.md

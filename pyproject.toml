@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: MIT
+# Copyright The Muster Authors
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muster-bridge"
+version = "0.0.0"
+description = "Serve Muster's Bridge protocol, so that a bridge to a messenger is only the calls to that messenger."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "The Muster Authors" }]
+keywords = ["muster", "bridge", "alerting", "on-call", "chat", "asgi", "starlette"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Topic :: Communications :: Chat",
+  "Topic :: System :: Monitoring",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28",
+  "pydantic>=2.11",
+  "starlette>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/muster-io/muster-bridge-python"
+Documentation = "https://muster-io.github.io/muster/messengers/write-a-bridge/"
+Issues = "https://github.com/muster-io/muster-bridge-python/issues"
+Changelog = "https://github.com/muster-io/muster-bridge-python/blob/master/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "anyio==4.15.1",
+  "coverage==7.16.2",
+  "datamodel-code-generator==0.86.0",
+  "mypy==2.4.0",
+  "openapi-core==0.23.1",
+  "pip-licenses==5.5.5",
+  "pytest==9.1.1",
+  "ruff==0.17.1",
+  "uvicorn==0.54.0",
+]
+
+[tool.uv]
+required-version = ">=0.13"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/muster_bridge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples", "/api/bridge.yaml", "/README.md", "/LICENSE"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["src/muster_bridge/models.py"]
+
+[tool.ruff.lint]
+select = [
+  "A", "ASYNC", "B", "C4", "D", "E", "F", "G", "I", "LOG", "N", "PIE", "PL", "PT", "RUF", "S", "SIM", "T20", "TRY",
+  "UP", "W",
+]
+ignore = [
+  "D107",    # __init__ is documented by its class's docstring
+  "TRY003",  # exception messages name the problem where it is raised
+  "TRY400",  # the library logs redacted text with logger.error, never the raw exception
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "S101", "S105", "S106", "PLR2004", "PLR0913"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-branches = 15
+max-returns = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["muster_bridge"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "examples"]
+mypy_path = ["src", "tests"]
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = ["error"]
+log_level = "DEBUG"
+
+[tool.coverage.run]
+source_pkgs = ["muster_bridge"]
+omit = ["*/muster_bridge/models.py"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "class .*\\(Protocol\\):", "@overload"]

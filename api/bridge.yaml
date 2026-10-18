@@ -1,0 +1,1316 @@
+openapi: 3.1.2
+info:
+  title: Muster Bridge protocol
+  version: 1.0.0
+  summary: The HTTP protocol between Muster and a bridge to a messenger Muster has no native support for.
+  description: |-
+    A **bridge** is a separate service that lets Muster deliver Alert Groups to a messenger it does not support natively
+    (ADR-0017). Muster calls the bridge to post, edit and reply; the bridge calls its messenger, and reports button
+    presses, Thread messages, Account link requests and deleted messages back to Muster. This document is the contract a
+    bridge implements. Terms follow Muster's glossary: a **Root message** is the one editable message that shows an Alert
+    Group in a channel, its **Thread** holds the replies under it, a **Mention** is a deliberate @-reference.
+
+    **Version.** Every path is under `/v1/`; `GET /v1/info` returns `protocol_version` `"1"`. New optional fields and
+    features keep version 1, so a bridge ignores fields it does not know and Muster ignores fields of `info` it does not
+    know. A change that breaks existing bridges gets a new major path.
+
+    **Authentication.** Muster sends the Connection's token on every request as `Authorization: Bearer <token>`; the
+    bridge answers `401` to a missing or wrong token. Events that the bridge pushes to Muster are signed as Standard
+    Webhooks does (see `webhooks`). Muster sends the token only to the base URL saved on the Connection, follows no
+    redirects, and treats a redirect as a configuration error.
+
+    **One token, one bot.** Each Bridge Connection in Muster has a token of its own. A bridge that serves several
+    Connections — several bots, or several Muster installations — tells them apart by the token and keeps their events
+    apart: `pollEvents` returns, and the push sends to the callback configured for that token, only the events about
+    the messages posted with it and the messages people send to its bot. Muster ignores, without answering, a press or a
+    Thread message about a message it did not post through that Connection.
+
+    **Ids in paths.** `message_id` and `channel_id` are opaque strings of up to 512 characters; Muster percent-encodes
+    each as one path segment, and the bridge decodes it.
+
+    **What every bridge implements.** `getInfo`, `postMessage`, `editMessage`, `replyInThread`, `checkChannel`,
+    `answerEvent`, and inbound events through `pollEvents` or the `bridgeEvent` push, or both — at least `account_link`
+    events, because every bridge takes Account link tokens. Everything else is optional and declared in
+    `info.capabilities`: Muster never calls an operation the bridge did not declare and never sends a button to a bridge
+    without `buttons`. A bridge sends `press` events only with `buttons`, `thread_message` events only with
+    `thread_messages` and `message_deleted` events only with `deletion_events`; Muster handles every event type of this
+    protocol whatever its copy of `info` says, so an event sent just after a feature was switched on is not lost.
+
+    **Rendering.** Muster sends a JSON envelope and the bridge renders it in its messenger's markup. The `body` is
+    CommonMark 0.31 with one extension, strikethrough (`~~text~~`) as GitHub Flavored Markdown writes it. Muster uses
+    paragraphs, hard line breaks, emphasis, strong emphasis, strikethrough, code spans, links, bullet lists and block
+    quotes; never headings, tables, images or raw HTML. Alert data in the body is already escaped for CommonMark and
+    cannot mention anyone. Links are `http(s)` links, plus Mention markers: a link `[@Display Name](muster-mention:<ref>)`
+    whose `ref` names an entry of `mentions`. A bridge with `native_mentions` renders the marker as its messenger's
+    mention of that account; any other bridge renders the link text alone, as plain text. Muster keeps the body within
+    `limits.max_body_length` code points; the bridge makes the final cut where its rendered markup needs it — never inside
+    an entity, a tag or a surrogate pair — and reports it with `truncated`.
+
+    **Idempotency.** Every request that creates something carries an `Idempotency-Key` header. The bridge stores each key
+    per token — the same key sent with another Connection's token is another request — with its successful (`2xx`)
+    result for at least 24 hours and answers a repeated key with that first result and `replayed: true`, whatever the
+    body of the repeated request, without creating anything again; a failed request stores nothing, so its retry is a
+    new attempt. A repeated key whose first request is still in progress is answered `transient`. Where the messenger
+    has an idempotency mechanism of its own, the bridge passes the key on. Muster reuses a key when it retries a request,
+    also after a crash or a timeout; because a retry may carry a newer state than the first request, Muster follows a
+    replayed `postMessage` with an `editMessage` of its current state.
+
+    **Errors** are RFC 9457 problems (`application/problem+json`) with a `class` member that the bridge chooses, because
+    only the bridge knows what its messenger's codes mean:
+
+    | `class` | Means | Muster |
+    |---|---|---|
+    | `transient` | a temporary failure: the messenger is down, a timeout | retries with exponential backoff; repeated failures make the Destination Broken |
+    | `rate_limited` | the messenger or the bridge throttles; send `Retry-After` in seconds | waits exactly that long, for the channel, or for every channel of the bot when `scope` is `bot`; not counted as a failure; a wait longer than 15 minutes, or none given, is treated as `transient` |
+    | `gone` | the message no longer exists — deleted, or its Thread is gone | publishes the Alert Group again once; with `reason` `edit_window_closed`, treats the message as past its edit window |
+    | `forbidden` | the channel is missing, the bot was removed from it or lacks a right, the bot was blocked | marks the Destination Broken until a check succeeds |
+    | `invalid` | the request cannot succeed as sent: too long, malformed, an unknown id | ends that delivery as Not delivered, without retrying |
+
+    A missing channel is `forbidden`, never `gone`. A problem without a `class`, or an answer that is not a problem, is
+    classified by its status: `401` and `403` as `forbidden`; `408` as `transient`; `429`, and `503` with `Retry-After`,
+    as `rate_limited`; other `5xx` as `transient`; `404`, `410`, a redirect and everything else as `invalid`. Timeouts
+    and network errors are `transient`. Muster never treats a message as `gone` because of a status code: a bridge that
+    means `gone` says so in `class`.
+
+    **Presses** are confirmed to the messenger by the bridge itself, within the messenger's deadline and at most 3
+    seconds after the press, before Muster has seen it; the bridge then reports the press as an event. Muster answers the
+    person, when it has something to say, with a separate `answerEvent` call, made before it acknowledges the event —
+    before it answers the push with `204` or polls with the next cursor.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+- url: '{bridge_url}'
+  description: The bridge's base URL, as saved on the Bridge Connection in Muster (a path prefix is allowed).
+  variables:
+    bridge_url:
+      default: https://bridge.example.org
+security:
+- bridgeToken: []
+tags:
+- name: Info
+  description: What the bridge is and what it offers.
+- name: Messages
+  description: Root messages and other messages in a channel, and their edits.
+- name: Threads
+  description: Replies in the Thread of a message.
+- name: Channels
+  description: Checking a channel without posting to it.
+- name: People
+  description: Looking people up and messaging them directly, for Account links.
+- name: Answers
+  description: Answers to the person behind an event.
+- name: Events
+  description: Presses, Thread messages, Account link requests and deleted messages, polled by Muster or pushed to it.
+paths:
+  /v1/info:
+    get:
+      operationId: getInfo
+      tags:
+      - Info
+      summary: Describe the bridge
+      description: Muster calls it on every Connection check, and again before a call when its copy is older than a few
+        minutes. A bridge whose features change — buttons switched on, a new limit — is picked up without a restart of
+        Muster.
+      responses:
+        '200':
+          description: The bridge, its messenger, its optional features and its limits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Info'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/messages:
+    post:
+      operationId: postMessage
+      tags:
+      - Messages
+      summary: Post a message to a channel
+      description: 'Posts a Root message, a Storm summary or a test message. `notify: true` is a Loud message: it should
+        notify people as the messenger''s new messages do, and carries the envelope''s Mentions. A Quiet message
+        (`notify: false`) is sent without a notification where the bridge declares `quiet_messages`, and otherwise as an
+        ordinary message without Mentions. The answer names the message for later edits and Thread replies; it may also
+        return the `thread_ref` of its Thread when the messenger''s Thread id is known at once. A replayed answer is
+        followed by an `editMessage` of Muster''s current state.'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageInput'
+      responses:
+        '201':
+          description: Posted, or the first result of the same `Idempotency-Key` with `replayed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePosted'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/messages/{message_id}:
+    parameters:
+    - $ref: '#/components/parameters/MessageId'
+    patch:
+      operationId: editMessage
+      tags:
+      - Messages
+      summary: Replace a message with a new state
+      description: Replaces the whole message — text, colour and buttons — with the envelope; an empty `buttons` removes
+        them. Edits are always Quiet and never carry Mentions, so the envelope has neither. Editing to the state the message
+        already shows is a success. A message that no longer exists is `gone`; an edit that the messenger refuses because
+        the message is older than it allows is `gone` with the `reason` `edit_window_closed`. Muster stops editing a
+        message once it is older than `limits.edit_max_age_seconds`, less a safety margin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageContent'
+      responses:
+        '200':
+          description: Edited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageEdited'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+    delete:
+      operationId: deleteMessage
+      tags:
+      - Messages
+      summary: Delete a message of the bot (optional)
+      description: Offered when `capabilities.delete` is declared. Muster L1 never deletes messages; the operation is
+        reserved so that a later version of Muster can remove its test messages without a new protocol version. A message
+        that no longer exists is a success.
+      responses:
+        '204':
+          description: Deleted, or already gone.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/messages/{message_id}/thread-replies:
+    parameters:
+    - $ref: '#/components/parameters/MessageId'
+    post:
+      operationId: replyInThread
+      tags:
+      - Threads
+      summary: Reply in the Thread of a message
+      description: 'Posts a reply in the Thread of the message `message_id`, usually a Root message. Muster sends the last
+        `thread_ref` it received for that message — from `postMessage` or from an earlier reply — or `null` when it has
+        none: the bridge then creates the Thread if its messenger needs that. It returns a `thread_ref`, which Muster
+        stores and sends with the next reply of the same Thread, so the bridge needs no store of its own that maps
+        messages to Threads. A `thread_ref` is opaque to Muster; it may equal the message id. A
+        Thread that no longer exists, or a message that was deleted, is `gone`. Replies may carry buttons, such as "Still
+        on it" on a Reminder, when the bridge declares `buttons`.'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreadReplyInput'
+      responses:
+        '201':
+          description: Posted, or the first result of the same `Idempotency-Key` with `replayed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreadReplyPosted'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/channels/{channel_id}/check:
+    parameters:
+    - $ref: '#/components/parameters/ChannelId'
+    post:
+      operationId: checkChannel
+      tags:
+      - Channels
+      summary: Check that the bot can post and edit in a channel
+      description: The Destination check. It must not post anything. Answer `200` only when the bot can post, edit its
+        own messages and reply in Threads there; answer `forbidden` with a `detail` a person can act on — "The bot is not
+        a member of this channel." — when the channel does not exist or the bot cannot use it. Muster runs it when a
+        Destination is saved, when a person presses "Check", and every few minutes while the Destination is Broken.
+      responses:
+        '200':
+          description: The bot can use the channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelCheck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/users:
+    get:
+      operationId: findUsers
+      tags:
+      - People
+      summary: Find a person by handle (optional)
+      description: Offered when `user_lookup` is not `none`. Muster calls it when a person asks to link an account by a
+        code and enters their handle — an email address, a login, a username or a user id, as `user_lookup` declares. The
+        answer lists the one account with that handle, or none. A handle the bridge cannot search for is `invalid`.
+      parameters:
+      - name: handle
+        in: query
+        required: true
+        description: The handle as the person entered it, in the kind `user_lookup` declares.
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 320
+      responses:
+        '200':
+          description: The account found, or an empty list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonList'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/direct-messages:
+    post:
+      operationId: sendDirectMessage
+      tags:
+      - People
+      summary: Send a direct message from the bot (optional)
+      description: Offered when `capabilities.direct_messages` is declared with `bot_can_start`. Muster uses it to send the
+        code of an Account link to the account a person named in their Muster profile. The bridge opens the direct chat
+        if needed. An account that cannot receive a message from the bot is `forbidden`.
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DirectMessageInput'
+      responses:
+        '201':
+          description: Sent, or the first result of the same `Idempotency-Key` with `replayed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectMessageSent'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/answers:
+    post:
+      operationId: answerEvent
+      tags:
+      - Answers
+      summary: Answer the person behind an event
+      description: 'Muster''s answer to a press, a Text command or an Account link request: a refusal, "Done: Acknowledged
+        #42", "Linked to Muster user …". The bridge shows `text` to the person who caused the event `event_id` and says
+        where: an answer to a press privately when its messenger allows that (`private_answers`) and the press is recent
+        enough, otherwise in the Thread of the message; an answer to a `thread_message` in that Thread, never as a
+        pop-up; an answer to an `account_link` in the direct chat it came from. Muster calls it within a few seconds of
+        receiving the event and before acknowledging it, or not at all; an event the bridge no longer knows, or can no
+        longer answer anywhere, is `gone`.'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerInput'
+      responses:
+        '200':
+          description: Shown, or the first result of the same `Idempotency-Key` with `replayed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerShown'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/events:
+    get:
+      operationId: pollEvents
+      tags:
+      - Events
+      summary: Long-poll for events
+      description: 'Offered when `event_delivery` contains `poll`. Returns the events after `cursor` — all of them when
+        `cursor` is absent — oldest first, at once when there are any, otherwise as soon as one arrives or after `wait`
+        seconds with an empty list; Muster waits for the answer up to `wait` plus 15 seconds. Muster handles the batch
+        and sends `next_cursor` with its next call, so an event is delivered at least once; the bridge may then forget
+        the events before that cursor. The bridge keeps events that Muster has not passed for at least 24 hours. A
+        cursor the bridge no longer knows is `invalid`, and Muster polls again without one. Only one Muster replica
+        polls a Connection at a time, but after a handover two calls may overlap; events are deduplicated by `id`.'
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        description: The `next_cursor` of the previous answer; opaque to Muster.
+        schema:
+          type: string
+          maxLength: 1024
+      - name: wait
+        in: query
+        required: false
+        description: How long to hold the request open when there are no events, in seconds.
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 60
+          default: 25
+      responses:
+        '200':
+          description: The next events, possibly none.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventBatch'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+webhooks:
+  bridgeEvent:
+    post:
+      operationId: bridgeEvent
+      tags:
+      - Events
+      summary: Push an event to Muster
+      description: |-
+        Offered when `event_delivery` contains `push` and chosen on the Connection. The bridge posts each event, one per
+        request, to the callback address that the Bridge Connection shows in Muster:
+        `<MUSTER_INGEST_URL>/api/v1/callbacks/bridge/<connection id>`.
+
+        The request is signed as Standard Webhooks specifies, with the Connection's push secret (`whsec_` followed by the
+        base64 of at least 24 random bytes, configured in both Muster and the bridge): `webhook-id` is the event's `id`,
+        `webhook-timestamp` the Unix time of the attempt in seconds, and `webhook-signature` is `v1,` followed by the
+        base64 of HMAC-SHA256 over `<webhook-id>.<webhook-timestamp>.<body>` with the decoded secret. Muster refuses a
+        timestamp more than 5 minutes away from its own clock.
+
+        Muster answers `204` once it has handled the event, and also for an event `id` it has handled before. `400` means
+        the event can never be handled — the bridge drops it. `401` means the signature, the Connection or its mode is
+        wrong; the bridge keeps the event and retries after fixing its configuration. On any other answer or a timeout
+        the bridge retries with backoff, for at least one hour, keeping the same `webhook-id`.
+      security: []
+      parameters:
+      - name: webhook-id
+        in: header
+        required: true
+        description: The event's `id`, kept across retries.
+        schema:
+          type: string
+          pattern: ^[!-~]{1,200}$
+      - name: webhook-timestamp
+        in: header
+        required: true
+        description: Unix time of this attempt, in seconds.
+        schema:
+          type: string
+          pattern: ^[0-9]{1,12}$
+      - name: webhook-signature
+        in: header
+        required: true
+        description: '`v1,<base64 HMAC-SHA256>`; several signatures separated by spaces are allowed while a secret is
+          rotated.'
+        schema:
+          type: string
+          minLength: 4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Event'
+      responses:
+        '204':
+          description: Handled, now or before.
+        '400':
+          description: The event can never be handled; drop it.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: The signature, the Connection or its event delivery mode is wrong.
+components:
+  securitySchemes:
+    bridgeToken:
+      type: http
+      scheme: bearer
+      description: The token saved on the Bridge Connection in Muster and configured in the bridge.
+  parameters:
+    MessageId:
+      name: message_id
+      in: path
+      required: true
+      description: The `message_id` the bridge returned when the message was posted; opaque to Muster.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+    ChannelId:
+      name: channel_id
+      in: path
+      required: true
+      description: The channel as the messenger names it and as the Admin entered it on the Bridge Destination.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Identifies the request across retries; a repeated key with the same token returns the first result
+        without creating anything again. Keys are scoped per token.
+      schema:
+        type: string
+        pattern: ^[!-~]{1,255}$
+  headers:
+    RetryAfter:
+      description: How long to wait before the next request, in seconds.
+      schema:
+        type: integer
+        minimum: 0
+  responses:
+    Invalid:
+      description: '`invalid`: the request cannot succeed as sent.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: The message is too long for this messenger.
+            status: 400
+            class: invalid
+    Unauthorized:
+      description: The token is missing or wrong. Muster treats it as `forbidden`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Unauthorized
+            status: 401
+            class: forbidden
+    Forbidden:
+      description: '`forbidden`: the channel is missing or the bot cannot use it.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Forbidden
+            status: 403
+            detail: The bot is not a member of this channel.
+            class: forbidden
+    Gone:
+      description: '`gone`: the message, its Thread or the event no longer exists.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            deleted:
+              summary: The message was deleted
+              value:
+                title: The message no longer exists.
+                status: 404
+                class: gone
+            editWindowClosed:
+              summary: The messenger no longer allows edits of this message
+              value:
+                title: The message can no longer be edited.
+                status: 404
+                class: gone
+                reason: edit_window_closed
+    RateLimited:
+      description: '`rate_limited`: wait for `Retry-After` seconds.'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Too many requests
+            status: 429
+            class: rate_limited
+            scope: channel
+    Transient:
+      description: '`transient`: a temporary failure; Muster retries.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: The messenger is not available.
+            status: 503
+            class: transient
+  schemas:
+    Info:
+      type: object
+      required:
+      - protocol_version
+      - bridge
+      - messenger
+      - capabilities
+      - limits
+      - user_lookup
+      - event_delivery
+      properties:
+        protocol_version:
+          type: string
+          description: The major version of this protocol the bridge speaks.
+          enum:
+          - '1'
+        bridge:
+          type: object
+          required:
+          - name
+          - version
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+            version:
+              type: string
+              minLength: 1
+              maxLength: 100
+        messenger:
+          type: object
+          required:
+          - name
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+              description: The messenger's name as people know it; Muster shows it on the Connection and the Destinations.
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+        limits:
+          $ref: '#/components/schemas/Limits'
+        user_lookup:
+          type: string
+          description: What a person enters to be found for an Account link by code, and what `findUsers` searches by.
+            `none` offers only the token sent to the bot.
+          enum:
+          - email
+          - login
+          - username
+          - user_id
+          - none
+        event_delivery:
+          type: array
+          description: The event delivery modes the bridge offers; each Connection chooses one.
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+            - poll
+            - push
+        link_url_template:
+          type:
+          - string
+          - 'null'
+          description: An `http` or `https` link that opens a chat with the bot and hands it the Account link token, with
+            `{token}` where the token goes, such as `https://chat.example.org/bots/muster?start={token}`. Muster shows the
+            link next to the token in the profile; without one it shows only the token. Another scheme makes `info` fail
+            the Connection check.
+          pattern: ^https?://\S*\{token\}\S*$
+          maxLength: 1024
+    Capabilities:
+      type: object
+      description: The optional features of the bridge. A missing member means the feature is not offered.
+      properties:
+        buttons:
+          type: object
+          description: The bridge shows buttons and reports presses on them.
+          required:
+          - max_per_message
+          - max_per_row
+          - data_max_bytes
+          - styles
+          properties:
+            max_per_message:
+              type: integer
+              minimum: 2
+              description: Muster sends at most this many; Snooze durations are dropped first.
+            max_per_row:
+              type: integer
+              minimum: 1
+            data_max_bytes:
+              type: integer
+              minimum: 64
+            styles:
+              type: array
+              description: The style hints the messenger can show as such; the bridge maps the others to the closest
+                one, or shows a plain button.
+              uniqueItems: true
+              items:
+                $ref: '#/components/schemas/ButtonStyle'
+        thread_messages:
+          type: string
+          description: The bridge reports people's messages in Threads of the bot's messages — every one, or only those
+            that mention the bot. Text commands need it.
+          enum:
+          - all
+          - mentions_only
+        direct_messages:
+          type: object
+          description: The bot can send direct messages, which Account links by code need.
+          required:
+          - bot_can_start
+          properties:
+            bot_can_start:
+              type: boolean
+              description: Whether the bot can write to a person who never wrote to it.
+        private_answers:
+          type: array
+          description: 'How the bridge can show an answer to one person only: an ephemeral message, a pop-up (short plain
+            text), or both.'
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+            - ephemeral
+            - popup
+        native_mentions:
+          type: boolean
+          description: Mention markers become the messenger's own mentions, which notify the person.
+        quiet_messages:
+          type: boolean
+          description: The messenger can post a new message without notifying anyone (`notify` false).
+        status_color:
+          type: boolean
+          description: The messenger can colour a message by `color`; otherwise the bridge shows `emoji`.
+        delete:
+          type: object
+          description: The bot can delete its own messages (unused by Muster L1).
+          required:
+          - max_age_seconds
+          properties:
+            max_age_seconds:
+              type:
+              - integer
+              - 'null'
+              minimum: 1
+        deletion_events:
+          type: boolean
+          description: The bridge reports `message_deleted` when a message of the bot is deleted in the messenger.
+    Limits:
+      type: object
+      required:
+      - max_body_length
+      - edit_max_age_seconds
+      properties:
+        max_body_length:
+          type: integer
+          minimum: 500
+          description: The longest `body`, in Unicode code points of the CommonMark Muster sends, that the bridge always
+            accepts for a post and for an edit alike, after its own rendering.
+        edit_max_age_seconds:
+          type:
+          - integer
+          - 'null'
+          minimum: 300
+          description: How long after posting the bot can still edit a message; `null` when edits never expire. Muster
+            stops editing a minute earlier.
+        send_per_second_per_channel:
+          type: number
+          exclusiveMinimum: 0
+          description: A hint for the Destination limiter; `rate_limited` stays the truth.
+        send_per_second:
+          type: number
+          exclusiveMinimum: 0
+          description: A hint for the Connection limiter, over all channels of the bot.
+    ButtonStyle:
+      type: string
+      description: A hint; the bridge maps it to the closest style its messenger has, or shows a plain button.
+      enum:
+      - primary
+      - danger
+      - neutral
+      - success
+    Button:
+      type: object
+      required:
+      - label
+      - style
+      - data
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 64
+        style:
+          $ref: '#/components/schemas/ButtonStyle'
+        data:
+          type: string
+          description: Opaque, signed by Muster; return it unchanged with the press.
+          pattern: ^[!-~]{1,64}$
+    Mention:
+      type: object
+      required:
+      - ref
+      - external_id
+      - display_name
+      properties:
+        ref:
+          type: string
+          description: Names the marker `muster-mention:<ref>` in the body.
+          pattern: ^[a-z0-9]{1,16}$
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The account's id in the messenger, as the bridge reported it when the account was linked.
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+    Link:
+      type: object
+      required:
+      - url
+      - label
+      properties:
+        url:
+          type: string
+          format: uri
+        label:
+          type: string
+          minLength: 1
+    Status:
+      type: string
+      description: The status of the Alert Group the message shows; `storm` for a Storm summary.
+      enum:
+      - firing
+      - acknowledged
+      - snoozed
+      - resolved
+      - storm
+    MessageKind:
+      type: string
+      description: A Root message of an Alert Group, a Storm summary, or a test message sent from the Destination page.
+      enum:
+      - root
+      - storm_summary
+      - test
+    MessageContent:
+      type: object
+      required:
+      - status
+      - color
+      - emoji
+      - title
+      - link
+      - body
+      - buttons
+      properties:
+        status:
+          $ref: '#/components/schemas/Status'
+        color:
+          type: string
+          description: The colour of the status, for messengers that colour messages.
+          pattern: ^#[0-9a-f]{6}$
+        emoji:
+          type: string
+          description: The status as an emoji (🔴 🟠 ⚪ 🟢 ⛈), for messengers without colours.
+          minLength: 1
+          maxLength: 8
+        title:
+          type: string
+          description: '`#N` and the Alert Group''s title, plain text; shown as the heading and linked to `link`.'
+          minLength: 1
+          maxLength: 512
+        link:
+          $ref: '#/components/schemas/Link'
+        body:
+          type: string
+          description: CommonMark, as the description of this protocol says; at most `limits.max_body_length` code points.
+        buttons:
+          type: array
+          description: In order. Empty when the message has none, always empty without `capabilities.buttons`.
+          items:
+            $ref: '#/components/schemas/Button'
+    MessageInput:
+      allOf:
+      - $ref: '#/components/schemas/MessageContent'
+      - type: object
+        required:
+        - channel_id
+        - kind
+        - mentions
+        - notify
+        properties:
+          channel_id:
+            type: string
+            minLength: 1
+            maxLength: 512
+          kind:
+            $ref: '#/components/schemas/MessageKind'
+          mentions:
+            type: array
+            items:
+              $ref: '#/components/schemas/Mention'
+          notify:
+            type: boolean
+            description: Loud (`true`) or Quiet (`false`).
+      example:
+        channel_id: ch-alerts
+        kind: root
+        status: firing
+        color: '#d32f2f'
+        emoji: 🔴
+        title: '#42 HighErrorRate'
+        link:
+          url: https://muster.example.org/alert-groups/AGK7M3QX9P2RTA
+          label: Open in Muster
+        body: |-
+          [@Alice Smith](muster-mention:m1)
+
+          prod · started 14:03
+
+          > **namespace** payments
+
+          - `api-7f9c` error rate 12 %
+          - `api-5d2a` error rate 9 %
+
+          [Runbook](https://wiki.example.org/runbooks/high-error-rate)
+        buttons:
+        - label: Ack
+          style: primary
+          data: a1.k2.QmFzZTY0U2lnbmF0dXJlRXhhbXBsZQ
+        - label: Resolve
+          style: success
+          data: a2.k2.U2Vjb25kU2lnbmF0dXJlRXhhbXBsZQ
+        mentions:
+        - ref: m1
+          external_id: u-alice
+          display_name: Alice Smith
+        notify: true
+    MessagePosted:
+      type: object
+      required:
+      - message_id
+      - truncated
+      - replayed
+      properties:
+        message_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Opaque to Muster; it encodes whatever the bridge needs to edit the message and reply under it.
+        thread_ref:
+          type:
+          - string
+          - 'null'
+          maxLength: 512
+          description: The message's Thread, when known at once; otherwise the first `replyInThread` returns it.
+        url:
+          type:
+          - string
+          - 'null'
+          format: uri
+          description: A link that opens the message in the messenger, if it has one; Muster shows it on the Alert Group
+            page and links to it from the Thread of an older Root message.
+        truncated:
+          type: boolean
+          description: The bridge shortened the body to fit its messenger.
+        replayed:
+          type: boolean
+          description: The `Idempotency-Key` was seen before, and this is its first result.
+    MessageEdited:
+      type: object
+      required:
+      - truncated
+      properties:
+        truncated:
+          type: boolean
+    ThreadReplyInput:
+      type: object
+      required:
+      - thread_ref
+      - body
+      - buttons
+      - mentions
+      - notify
+      properties:
+        thread_ref:
+          type:
+          - string
+          - 'null'
+          maxLength: 512
+          description: The last `thread_ref` Muster received for the message — from `postMessage` or an earlier reply —
+            or `null` when it has none.
+        body:
+          type: string
+          description: CommonMark, at most `limits.max_body_length` code points.
+        buttons:
+          type: array
+          items:
+            $ref: '#/components/schemas/Button'
+        mentions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mention'
+        notify:
+          type: boolean
+          description: Loud (`true`) or Quiet (`false`).
+    ThreadReplyPosted:
+      type: object
+      required:
+      - message_id
+      - thread_ref
+      - truncated
+      - replayed
+      properties:
+        message_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The reply; presses on its buttons name it.
+        thread_ref:
+          type: string
+          minLength: 1
+          maxLength: 512
+        truncated:
+          type: boolean
+        replayed:
+          type: boolean
+    ChannelCheck:
+      type: object
+      required:
+      - channel_id
+      - name
+      properties:
+        channel_id:
+          type: string
+        name:
+          type: string
+          description: The channel's name as people see it; Muster shows it on the Destination.
+          minLength: 1
+          maxLength: 200
+    Person:
+      type: object
+      required:
+      - external_id
+      - display_name
+      properties:
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: The account's stable id in the messenger.
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        handle:
+          type:
+          - string
+          - 'null'
+          maxLength: 320
+          description: The account's handle of the kind `user_lookup` declares, when the bridge knows it.
+    PersonList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          maxItems: 1
+          items:
+            $ref: '#/components/schemas/Person'
+    DirectMessageInput:
+      type: object
+      required:
+      - user_external_id
+      - body
+      properties:
+        user_external_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        body:
+          type: string
+          description: CommonMark.
+          minLength: 1
+          maxLength: 2000
+    DirectMessageSent:
+      type: object
+      required:
+      - message_id
+      - replayed
+      properties:
+        message_id:
+          type: string
+        replayed:
+          type: boolean
+    AnswerInput:
+      type: object
+      required:
+      - event_id
+      - text
+      properties:
+        event_id:
+          type: string
+          pattern: ^[!-~]{1,200}$
+        text:
+          type: string
+          description: Plain text; a pop-up may shorten it.
+          minLength: 1
+          maxLength: 500
+    AnswerShown:
+      type: object
+      required:
+      - shown_as
+      - replayed
+      properties:
+        shown_as:
+          type: string
+          description: Where the person sees the answer.
+          enum:
+          - ephemeral
+          - popup
+          - thread
+          - direct
+        replayed:
+          type: boolean
+    EventBatch:
+      type: object
+      required:
+      - events
+      - next_cursor
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        next_cursor:
+          type: string
+          description: Send it as `cursor` with the next call; opaque to Muster.
+          maxLength: 1024
+    EventBase:
+      type: object
+      required:
+      - id
+      - type
+      - occurred_at
+      properties:
+        id:
+          type: string
+          description: Stable across retries and polls; Muster handles each id once. Printable ASCII without spaces, so
+            that it can travel as the `webhook-id` header.
+          pattern: ^[!-~]{1,200}$
+        type:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+          description: When it happened in the messenger, or when the bridge learned of it.
+    PressEvent:
+      allOf:
+      - $ref: '#/components/schemas/EventBase'
+      - type: object
+        description: A press of a button of a message of the bot, already confirmed to the messenger.
+        required:
+        - message_id
+        - user
+        - data
+        properties:
+          type:
+            const: press
+          message_id:
+            type: string
+            description: The message the button belongs to, a Root message or a Thread reply.
+          user:
+            $ref: '#/components/schemas/Person'
+          data:
+            type: string
+            description: The button's `data`, unchanged.
+    ThreadMessageEvent:
+      allOf:
+      - $ref: '#/components/schemas/EventBase'
+      - type: object
+        description: A person's message in the Thread of a message of the bot, sent when `capabilities.thread_messages`
+          is declared. Messages of the bot itself are never reported.
+        required:
+        - message_id
+        - thread_ref
+        - user
+        - text
+        properties:
+          type:
+            const: thread_message
+          message_id:
+            type: string
+            description: The message whose Thread it is in — the `message_id` in the path of `replyInThread`, usually a
+              Root message, never the id of a reply.
+          thread_ref:
+            type:
+            - string
+            - 'null'
+          user:
+            $ref: '#/components/schemas/Person'
+          text:
+            type: string
+            description: The message as plain text, mentions of the bot removed.
+            maxLength: 4000
+    AccountLinkEvent:
+      allOf:
+      - $ref: '#/components/schemas/EventBase'
+      - type: object
+        description: Someone sent the bot an Account link token — a direct message whose whole text, trimmed and after
+          an optional `/start `, is 43 characters of base64url — or opened the `link_url_template` link.
+        required:
+        - token
+        - user
+        properties:
+          type:
+            const: account_link
+          token:
+            type: string
+            pattern: ^[A-Za-z0-9_-]{43}$
+          user:
+            $ref: '#/components/schemas/Person'
+    MessageDeletedEvent:
+      allOf:
+      - $ref: '#/components/schemas/EventBase'
+      - type: object
+        description: A message of the bot was deleted in the messenger; sent when `capabilities.deletion_events` is
+          declared.
+        required:
+        - message_id
+        properties:
+          type:
+            const: message_deleted
+          message_id:
+            type: string
+    Event:
+      description: One event; `type` selects the variant. `account_link` events are always sent; the others only with
+        the feature they belong to (`buttons`, `thread_messages`, `deletion_events`).
+      oneOf:
+      - $ref: '#/components/schemas/PressEvent'
+      - $ref: '#/components/schemas/ThreadMessageEvent'
+      - $ref: '#/components/schemas/AccountLinkEvent'
+      - $ref: '#/components/schemas/MessageDeletedEvent'
+      discriminator:
+        propertyName: type
+        mapping:
+          press: '#/components/schemas/PressEvent'
+          thread_message: '#/components/schemas/ThreadMessageEvent'
+          account_link: '#/components/schemas/AccountLinkEvent'
+          message_deleted: '#/components/schemas/MessageDeletedEvent'
+    Problem:
+      type: object
+      description: RFC 9457 problem details with the Bridge protocol's members.
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+          description: Shown to the Admin as the reason, as untrusted text; never put a secret in it.
+          maxLength: 1000
+        instance:
+          type: string
+        class:
+          $ref: '#/components/schemas/ErrorClass'
+        scope:
+          type: string
+          description: For `rate_limited`, whether the wait holds one channel or every channel of the bot.
+          enum:
+          - channel
+          - bot
+          default: channel
+        reason:
+          type: string
+          description: For `gone`, `edit_window_closed` when the messenger refuses the edit only because of the message's
+            age.
+          enum:
+          - edit_window_closed
+    ErrorClass:
+      type: string
+      enum:
+      - transient
+      - rate_limited
+      - gone
+      - forbidden
+      - invalid
