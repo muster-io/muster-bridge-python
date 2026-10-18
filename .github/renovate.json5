@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: MIT
+// Copyright The Muster Authors
+
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:best-practices"],
+  rangeStrategy: "pin",
+  dependencyDashboard: true,
+  // Version policy, as in Muster's repository: routine updates arrive once a week, grouped per ecosystem, and merge
+  // themselves when every required check passes. Major updates wait in the Dependency Dashboard until a maintainer
+  // ticks them. Security fixes are not held by the schedule.
+  schedule: ["before 6am on Monday"],
+  minimumReleaseAge: "3 days",
+  prConcurrentLimit: 4,
+  prHourlyLimit: 2,
+  // A tool version pinned on the line under a `# renovate:` comment: `NAME_VERSION: 1.2.3` in a workflow's env, such
+  // as the version of uv.
+  customManagers: [
+    {
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*[A-Z_]+_VERSION: (?<currentValue>\\S+)",
+      ],
+    },
+  ],
+  packageRules: [
+    {
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
+    },
+    {
+      matchUpdateTypes: ["minor", "patch", "pin", "pinDigest", "digest"],
+      automerge: true,
+      automergeType: "pr",
+      platformAutomerge: true,
+    },
+    {
+      matchDatasources: ["github-actions"],
+      groupName: "GitHub Actions",
+    },
+    {
+      matchManagers: ["pep621"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "Python packages (non-major)",
+    },
+    // The runtime dependencies keep the lower bounds the library states for its users; only uv.lock moves to the
+    // newest releases, which CI tests.
+    {
+      matchManagers: ["pep621"],
+      matchDepTypes: ["project.dependencies"],
+      rangeStrategy: "update-lockfile",
+    },
+    // requires-python, the CI's Python matrix and the classifiers move by hand when CPython releases.
+    {
+      matchManagers: ["pep621"],
+      matchDepTypes: ["requires-python"],
+      enabled: false,
+    },
+    // .python-version names the newest CPython release of the matrix: Renovate proposes a new release and leaves the
+    // pull request to the maintainer, who adds the release to the matrix and the classifiers in it.
+    {
+      matchManagers: ["pyenv"],
+      automerge: false,
+    },
+    {
+      matchPackageNames: ["datamodel-code-generator"],
+      prBodyNotes: "Regenerate src/muster_bridge/models.py with `make generate` and commit it.",
+    },
+  ],
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 3am on Monday"],
+  },
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["security"],
+  },
+}
