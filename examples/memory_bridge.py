@@ -11,8 +11,8 @@ Muster, muster bridge check or a person with curl can try the Bridge protocol wi
 It offers every feature, or with BRIDGE_FEATURES only those it lists, comma-separated: buttons, thread_messages,
 direct_messages (which also turns on user_lookup login), private_answers, native_mentions, quiet_messages,
 status_color, deletion_events and delete. Outside the protocol it serves POST /demo/press {"message_id", "user"},
-which presses the first button of the message as the person with that login. It has no authentication of its own:
-it listens on loopback by default.
+which presses the first button of the message as the person with that login. Unlike the protocol, which needs the
+token, it has no authentication of its own: the example listens on loopback by default.
 """
 
 from __future__ import annotations
