@@ -113,9 +113,9 @@ uvicorn.run(app, host="127.0.0.1", port=18095)
 ```
 
 `POST /demo/press` `{"message_id": "4f0c1a-m2", "user": "alice"}` presses the first button of message `4f0c1a-m2` as
-`alice`, so that a script can play the person of an interactive check. Like the rest of the example it has no
-authentication of its own: keep it on loopback. Message ids start with a prefix that is random for each start of the
-example, so that a restarted example never reuses an id that Muster still holds.
+`alice`, so that a script can play the person of an interactive check. It has no authentication of its own: keep it
+on loopback. Message ids start with a prefix that is random for each start of the example, so that a restarted example
+never reuses an id that Muster still holds.
 
 ## Serving the bridge
 
