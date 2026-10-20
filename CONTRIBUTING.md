@@ -53,7 +53,9 @@ analyse the code and the repository's practices.
 - Branch from `master`; a story's branch is `s-NNN-<slug>`, with the slug of its story file name.
 - Commit messages are [conventional commits](https://www.conventionalcommits.org/) on one line:
   `<type>(<scope>): <description>`, with `feat`, `fix`, `docs`, `build`, `ci`, `test`, `refactor`, `perf` or `chore`.
-  Say what changed; leave out story and phase IDs.
+  Say what changed; leave out story and phase IDs. `build` means a dependency change, the type Renovate uses: it shows
+  under "Dependencies" in the changelog and starts a release. Work on the build system or the tooling uses `chore` or
+  `ci`.
 - No AI attribution: no `Co-Authored-By` trailers for tools and no "Generated with" lines, in commits or pull requests.
 - Pull requests are squash-merged, so the title becomes the commit message, and release-please writes the changelog
   from it.
