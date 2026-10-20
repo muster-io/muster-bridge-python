@@ -347,7 +347,9 @@ class PollEventsParameters(BaseModel):
 
 class CapabilitiesButtons(BaseModel):
     max_per_message: int = Field(
-        ..., description="Muster sends at most this many; Snooze durations are dropped first.", ge=2
+        ...,
+        description="Muster sends at most this many, dropping Snooze buttons first: the Snooze presets, then the durations from the longest.",
+        ge=2,
     )
     max_per_row: int = Field(..., ge=1)
     data_max_bytes: int = Field(..., ge=64)

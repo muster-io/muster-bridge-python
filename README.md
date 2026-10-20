@@ -20,7 +20,8 @@ pip install muster-bridge
 
 Python 3.11 or newer. The distribution is `muster-bridge`, the import package `muster_bridge`; it depends on
 Starlette, httpx and pydantic 2 only. The package is not on PyPI before its first release; until then, install it from
-a clone (`pip install .`). Versions stay `0.x` until Muster's first release; then `1.x` speaks protocol version 1.
+a clone (`pip install .`). Versions stay `0.x` until Muster 1.0. Every `0.x` release speaks protocol
+version 1; a breaking protocol change would be a new protocol version, not a new library version.
 
 ## Quick start
 

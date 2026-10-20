@@ -706,7 +706,8 @@ components:
             max_per_message:
               type: integer
               minimum: 2
-              description: Muster sends at most this many; Snooze durations are dropped first.
+              description: 'Muster sends at most this many, dropping Snooze buttons first: the Snooze presets, then the
+                durations from the longest.'
             max_per_row:
               type: integer
               minimum: 1
