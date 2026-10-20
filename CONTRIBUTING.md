@@ -94,4 +94,4 @@ release-please keeps a release pull request open, with the changelog written fro
 `master`; it updates the version in `pyproject.toml`, `src/muster_bridge/__init__.py` and the project's entry in
 `uv.lock`. Merging it creates the release and its `vX.Y.Z` tag; the workflow then builds the sdist and the wheel and
 publishes them to PyPI by trusted publishing from the environment `pypi`, with attestations and no stored token.
-Versions stay `0.x` until Muster's first release.
+Versions stay `0.x` until Muster 1.0.
