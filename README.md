@@ -52,7 +52,7 @@ Then let Muster's conformance check run every step of the protocol against it, f
 check reaches the example on the host's loopback, which `--network host` gives only on Linux:
 
 ```sh
-docker run --rm --network host -v /tmp/bt:/token:ro ghcr.io/muster-io/muster:edge bridge check \
+docker run --rm --network host -v /tmp/bt:/token:ro ghcr.io/muster-io/muster:latest bridge check \
   http://127.0.0.1:18095 --token-file /token --channel alerts --forbidden-channel nobot --handle alice \
   --no-interactive
 ```
