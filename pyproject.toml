@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "muster-bridge"
-version = "0.0.0"
+version = "0.1.0"
 description = "Serve Muster's Bridge protocol, so that a bridge to a messenger is only the calls to that messenger."
 readme = "README.md"
 license = "MIT"
