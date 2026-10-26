@@ -131,10 +131,15 @@ paths:
       summary: Post a message to a channel
       description: 'Posts a Root message, a Storm summary or a test message. `notify: true` is a Loud message: it should
         notify people as the messenger''s new messages do, and carries the envelope''s Mentions. A Quiet message
-        (`notify: false`) is sent without a notification where the bridge declares `quiet_messages`, and otherwise as an
-        ordinary message without Mentions. The answer names the message for later edits and Thread replies; it may also
-        return the `thread_ref` of its Thread when the messenger''s Thread id is known at once. A replayed answer is
-        followed by an `editMessage` of Muster''s current state.'
+        (`notify: false`) is sent without a notification where the bridge declares `quiet_messages`, and otherwise as
+        the bridge posts any Quiet message, as an ordinary message. It carries no Mentions but one: to a bridge with
+        `native_mentions`, a Root message whose footer names who acknowledged, snoozed or resolved it, linked through
+        the Connection, carries that account as one entry of `mentions` with its marker in the footer, Loud or Quiet
+        alike, and the bridge renders that marker as any other, its messenger''s mention of the account. To any other
+        bridge the footer names the account by its display name as plain text, without a marker. The answer names the
+        message for later edits and Thread replies; it may also return the `thread_ref` of its Thread when the
+        messenger''s Thread id is known at once. A replayed answer is followed by an `editMessage` of Muster''s current
+        state.'
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
