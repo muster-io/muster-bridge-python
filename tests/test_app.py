@@ -33,6 +33,7 @@ from conftest import (
 )
 from starlette.applications import Starlette
 from starlette.routing import Mount
+from test_layout import LAYOUT, with_layout
 
 from muster_bridge import (
     AnswerShownShownAs,
@@ -42,6 +43,7 @@ from muster_bridge import (
     DirectMessageSent,
     KeyClaim,
     KeyState,
+    MessageContent,
     MessageEdited,
     MessagePosted,
     Person,
@@ -976,3 +978,20 @@ async def test_lifespan_messages_are_answered(bridge: Harness) -> None:
 
     await bridge.app({"type": "lifespan", "asgi": {"version": "3.0"}}, cast("Any", messages.get), cast("Any", send))
     assert sent == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+
+
+async def test_the_messenger_gets_the_layout_that_muster_sent_and_none_without_it(bridge: Harness) -> None:
+    for method, path, key, plain in (
+        ("POST", "/v1/messages", "k1", POST_BODY),
+        ("PATCH", "/v1/messages/m1", None, EDIT_BODY),
+    ):
+        assert (await bridge.call(method, path, key=key, body=plain)).is_success
+        assert (await bridge.call(method, path, key=key and "k2", body=with_layout(plain))).is_success
+    got = [cast(MessageContent, call.payload).layout for call in bridge.messenger.calls]
+    assert [layout and layout.model_dump(mode="json") for layout in got] == [None, LAYOUT, None, LAYOUT]
+
+
+async def test_a_layout_that_does_not_match_the_specification_is_invalid(bridge: Harness) -> None:
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_layout(POST_BODY, {"number": "42"}))
+    problem_of(response, 400, "invalid")
+    assert bridge.messenger.count("post_message") == 0

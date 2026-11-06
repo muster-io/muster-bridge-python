@@ -35,6 +35,7 @@ from openapi_core.datatypes import RequestParameters
 from openapi_core.testing import MockRequest, MockResponse
 from openapi_core.validation.request.exceptions import MissingRequiredParameter
 from openapi_core.validation.response.exceptions import InvalidData
+from test_layout import with_layout
 
 from muster_bridge import (
     ButtonStyle,
@@ -165,7 +166,9 @@ EXCHANGES = [
     Exchange("getInfo", "401", "GET", "/v1/info", 401, token="wrong"),
     Exchange("postMessage", "201", "POST", POST, 201, POST_BODY),
     Exchange("postMessage", "201 replayed", "POST", POST, 201, POST_BODY, setup=replay(POST, POST_BODY)),
+    Exchange("postMessage", "201 layout", "POST", POST, 201, with_layout(POST_BODY)),
     Exchange("postMessage", "400 spec", "POST", POST, 400, "{}", invalid=True),
+    Exchange("postMessage", "400 layout", "POST", POST, 400, with_layout(POST_BODY, "{}"), invalid=True),
     Exchange("postMessage", "400 limit", "POST", POST, 400, with_body(POST_BODY, "x" * 501)),
     Exchange("postMessage", "401", "POST", POST, 401, POST_BODY, token="wrong"),
     Exchange("postMessage", "403", "POST", POST, 403, POST_BODY, error=forbidden),
@@ -174,6 +177,8 @@ EXCHANGES = [
     Exchange("postMessage", "500", "POST", POST, 500, POST_BODY, error=broken),
     Exchange("postMessage", "500 running", "POST", POST, 500, POST_BODY, setup=running_key),
     Exchange("editMessage", "200", "PATCH", EDIT, 200, EDIT_BODY),
+    Exchange("editMessage", "200 layout", "PATCH", EDIT, 200, with_layout(EDIT_BODY)),
+    Exchange("editMessage", "400 layout", "PATCH", EDIT, 400, with_layout(EDIT_BODY, "{}"), invalid=True),
     Exchange("editMessage", "400", "PATCH", EDIT, 400, '{"status":"x"}', invalid=True),
     Exchange("editMessage", "401", "PATCH", EDIT, 401, EDIT_BODY, token="wrong"),
     Exchange("editMessage", "403", "PATCH", EDIT, 403, EDIT_BODY, error=forbidden),

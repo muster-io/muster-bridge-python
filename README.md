@@ -202,6 +202,57 @@ A few more things to know:
   every exception it logs; keep anything else secret, such as an event's Account link token, out of the exceptions of
   your messenger and your store.
 
+## Rendering the layout
+
+A Root message and a test message carry their content twice: as CommonMark in `body`, and as plain-text data in
+`message.layout`, a `Layout`. A bridge renders either `body` or `layout`, never both. A bridge that ignores `layout`
+works as before, and a message without one — a Storm summary, a Thread reply, a Root message that a template of the
+Route renders — is rendered from `body`, so `layout` is `None` and the bridge always keeps that path. Every value of
+`layout` is plain text, never CommonMark: the bridge escapes it for its messenger. A test message has the mark of a test
+as the first of its `notices`. `LayoutLink.url` is a `str`, as Muster sends it, and may be an IRI. The Owner carries the
+`ref` of its entry in `message.mentions` when the message mentions them, and `None` in an edit.
+
+```python
+from html import escape
+
+from muster_bridge import LayoutPerson, MessageContent, MessageInput, MessageKind
+
+
+def render(message: MessageContent | MessageInput) -> str:
+    """Render a message for a messenger that reads HTML, from its layout, or from its body when it has none."""
+    layout = message.layout
+    if layout is None:
+        return message.body
+
+    def person(who: LayoutPerson) -> str:
+        mention = mentions.get(who.ref) if who.ref else None
+        return f"<@{escape(mention.external_id)}>" if mention else escape(who.name)
+
+    mentions = {m.ref: m for m in message.mentions} if isinstance(message, MessageInput) else {}
+    is_test = isinstance(message, MessageInput) and message.kind == MessageKind.test
+    lines = [escape(layout.notices[0])] if is_test and layout.notices else []
+    notices = layout.notices[len(lines) :]
+    lines.append(f"<b>{escape(layout.status.word)}</b> #{layout.number} {escape(layout.title)}")
+    lines += [f"{escape(f.name)}: {escape(f.value)}" for f in layout.fields]
+    lines += [escape(text) for text in (layout.summary, layout.description) if text]
+    lines += [f"{escape(label.key)}: {escape(label.value)}" for label in layout.labels]
+    if layout.alerts:
+        shown = ", ".join(f"<s>{escape(v.value)}</s>" if v.resolved else escape(v.value) for v in layout.alerts.values)
+        more = layout.alerts.total - len(layout.alerts.values)
+        lines.append(f"{escape(layout.alerts.label)}: {shown}" + (f" and {more} more" if more > 0 else ""))
+    lines += [escape(notice) for notice in notices]
+    if layout.assignees:
+        lines.append("Paged: " + ", ".join(person(who) for who in layout.assignees))
+    if layout.owner:
+        lines.append("Owner: " + person(layout.owner))
+    lines += [f'<a href="{escape(link.url)}">{escape(link.label)}</a>' for link in layout.links]
+    return "\n".join(lines)
+```
+
+A status key that this version of the library does not know — a future spec may add one — makes it answer `invalid`
+to that request, so upgrade the library when Muster's protocol copy changes. The number is a field of its own, because `#N` in text becomes a hashtag in some messengers; `total` is how many Alerts
+the Alert Group has, so "and K more" counts the ones the message does not list. The buttons stay in `message.buttons`.
+
 ## Checking a bridge
 
 `muster bridge check <url> --token-file <file> --channel <id>` runs every step of the protocol against a bridge and
