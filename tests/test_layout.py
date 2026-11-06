@@ -157,13 +157,15 @@ def test_the_example_counts_more_alerts_from_the_total_and_marks_a_test() -> Non
         "alerts": {"label": "pod", "values": [{"value": "a", "resolved": False}], "total": 1},
         "owner": None,
     }
-    content = MessageContent.model_validate_json(with_layout(EDIT_BODY, layout))
-    lines = render(content).split("\n")
+    body = POST_BODY.replace('"kind":"root"', '"kind":"test"')
+    lines = render(MessageInput.model_validate_json(with_layout(body, layout))).split("\n")
+    assert lines[0] == "🧪 Test message"
+    assert lines.count("🧪 Test message") == 1
     assert "pod: a" in lines
-    assert lines.index("🧪 Test message") < lines.index(
-        '<a href="https://muster.example.org/alert-groups/AGK7M3QX9P2RTA">Open in Muster</a>'
-    )
     assert not any(line.startswith("Owner") for line in lines)
+    root = render(MessageInput.model_validate_json(with_layout(POST_BODY, layout))).split("\n")
+    assert root[0].startswith("<b>Firing</b>")
+    assert "🧪 Test message" in root
 
 
 async def test_a_layout_that_does_not_match_is_refused_before_the_messenger(bridge: Harness) -> None:
