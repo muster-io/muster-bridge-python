@@ -100,8 +100,8 @@ MAX_REQUEST_BYTES = 4 << 20
 """The library's cap on a request body, which leaves room for any max_body_length it accepts.
 
 The layout repeats the body's content, and Muster's JSON escaping writes up to 6 bytes for one character (\\u003c for
-<, >, &, U+2028 and control characters). At a max_body_length of 100000 that is about 1.2 MB per copy of the content
-and so about 2.4 MB per request; 4 MiB leaves room for the rest of the message.
+<, >, &, U+2028 and control characters). At a max_body_length of 100000 that is about 600 KB per copy of the content
+and so about 1.2 MB per request with the body and the layout, which already exceeds 1 MiB; 4 MiB leaves a wide margin.
 """
 MAX_CHANNEL_NAME = 200
 KEY_CLAIM_TTL = timedelta(minutes=2)
