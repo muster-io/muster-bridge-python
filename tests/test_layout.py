@@ -168,15 +168,95 @@ def test_the_example_counts_more_alerts_from_the_total_and_marks_a_test() -> Non
     assert "🧪 Test message" in root
 
 
-async def test_a_layout_that_does_not_match_is_refused_before_the_messenger(bridge: Harness) -> None:
+async def test_a_layout_that_does_not_match_is_dropped_and_the_message_accepted(
+    bridge: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
     broken = {k: v for k, v in LAYOUT.items() if k != "number"}
-    for path, method, body in (
-        ("/v1/messages", "POST", with_layout(POST_BODY, broken)),
-        ("/v1/messages/m1", "PATCH", with_layout(EDIT_BODY, broken)),
-        ("/v1/messages", "POST", with_layout(POST_BODY, {**LAYOUT, "status": {"key": "burning", "word": "x"}})),
-        ("/v1/messages", "POST", with_layout(POST_BODY, "[]")),
+    future = {**LAYOUT, "status": {"key": "burning", "word": "x"}}
+    no_ref = {**LAYOUT, "owner": {"name": "Alice Smith", "team": {"name": "Payments"}}}
+    for i, (path, method, body, at) in enumerate(
+        (
+            ("/v1/messages", "POST", with_layout(POST_BODY, broken), "/layout/number"),
+            ("/v1/messages/m1", "PATCH", with_layout(EDIT_BODY, broken), "/layout/number"),
+            ("/v1/messages", "POST", with_layout(POST_BODY, future), "/layout/status/key"),
+            ("/v1/messages", "POST", with_layout(POST_BODY, no_ref), "/layout/owner/ref"),
+            ("/v1/messages", "POST", with_layout(POST_BODY, "[]"), "/layout"),
+        )
+    ):
+        caplog.clear()
+        response = await bridge.call(method, path, key=f"k{i}", body=body)
+        assert response.status_code in (200, 201), response.text
+        payload = bridge.messenger.calls[-1].payload
+        assert isinstance(payload, MessageContent)
+        assert payload.layout is None
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        text = warnings[0].getMessage()
+        assert "layout" in text
+        assert at in text
+        for content in ("HighErrorRate", "Error rate above 5", "Alice Smith", "payments"):
+            assert content not in text
+    assert len(bridge.messenger.calls) == 5
+
+
+async def test_a_layout_that_is_null_is_dropped_and_the_message_accepted(
+    bridge: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_layout(POST_BODY, "null"))
+    assert response.status_code == 201, response.text
+    payload = bridge.messenger.calls[-1].payload
+    assert isinstance(payload, MessageContent)
+    assert payload.layout is None
+    assert "/layout: must be absent, not null" in next(
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    )
+
+
+async def test_a_team_that_is_null_drops_the_layout(bridge: Harness, caplog: pytest.LogCaptureFixture) -> None:
+    for i, layout in enumerate(
+        (
+            {**LAYOUT, "owner": {"name": "Alice Smith", "ref": "m1", "team": None}},
+            {**LAYOUT, "assignees": [{"name": "Bob", "ref": None, "team": None}]},
+        )
+    ):
+        caplog.clear()
+        response = await bridge.call("POST", "/v1/messages", key=f"k{i}", body=with_layout(POST_BODY, layout))
+        assert response.status_code == 201, response.text
+        payload = bridge.messenger.calls[-1].payload
+        assert isinstance(payload, MessageContent)
+        assert payload.layout is None
+        assert "team: must be absent, not null" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_a_ref_and_an_owner_that_are_null_stay_valid(bridge: Harness) -> None:
+    layout = {**LAYOUT, "alerts": None, "owner": None, "assignees": [{"name": "Bob", "ref": None}]}
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_layout(POST_BODY, layout))
+    assert response.status_code == 201, response.text
+    payload = bridge.messenger.calls[-1].payload
+    assert isinstance(payload, MessageContent)
+    assert payload.layout is not None
+    assert payload.layout.owner is None
+
+
+async def test_a_body_that_does_not_match_is_still_refused_beside_a_good_layout(
+    bridge: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    for method, path, body in (
+        ("POST", "/v1/messages", with_layout(POST_BODY.replace('"body":', '"bodyx":', 1))),
+        ("PATCH", "/v1/messages/m1", with_layout(EDIT_BODY.replace('"title":', '"titlex":', 1))),
     ):
         response = await bridge.call(method, path, key="k1", body=body)
         assert response.status_code == 400, response.text
         assert response.json()["class"] == "invalid"
+    broken_both = with_layout(POST_BODY.replace('"body":', '"bodyx":', 1), "[]")
+    assert (await bridge.call("POST", "/v1/messages", key="k2", body=broken_both)).status_code == 400
     assert not bridge.messenger.calls
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+async def test_a_request_of_2_5_mb_is_accepted(bridge: Harness) -> None:
+    body = with_layout(POST_BODY)
+    padded = body.removesuffix("}") + " " * (2_500_000 - len(body)) + "}"
+    assert len(padded) == 2_500_000
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=padded)
+    assert response.status_code == 201, response.text
