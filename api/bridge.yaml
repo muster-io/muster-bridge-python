@@ -876,6 +876,11 @@ components:
       - test
     MessageContent:
       type: object
+      description: The envelope of a message. A Root message and a test message also carry `layout`, the same content
+        as `body` as plain-text data; a bridge renders either `body` or `layout`, and a bridge that ignores `layout`
+        is unaffected. A message without `layout` is rendered from `body`, always — a Storm summary, a Root message
+        whose Route renders it with a Root message template or a line template of its own, or with Muster's fallback
+        template, whose content only `body` holds, or a message of an earlier version of Muster.
       required:
       - status
       - color
@@ -911,6 +916,193 @@ components:
           description: In order. Empty when the message has none, always empty without `capabilities.buttons`.
           items:
             $ref: '#/components/schemas/Button'
+        layout:
+          $ref: '#/components/schemas/Layout'
+    Layout:
+      type: object
+      description: |-
+        The content of a Root message or a test message as structured data, for a bridge that renders it natively
+        instead of rendering `body`: the same content in the same order, without the buttons, which stay in `buttons`.
+        Muster sends it only when this is the whole content: a Root message that a Route's own Root message template
+        or line template, or Muster's fallback template, renders has no `layout`, and the bridge renders its `body`.
+        A test message has the mark of a test as its first notice, as `body` has it first.
+        Every value is plain text, never CommonMark — the bridge escapes it for its messenger — and alert data in it
+        cannot mention anyone. When Muster shortens `body` to `limits.max_body_length`, `layout` loses the same parts:
+        the description first, then the Alerts, the summary and the labels, while the title, the status, the fields,
+        the people and the links always stay; a bridge that has to cut more cuts in the same order.
+      required:
+      - number
+      - title
+      - status
+      - fields
+      - summary
+      - description
+      - labels
+      - alerts
+      - notices
+      - assignees
+      - owner
+      - links
+      properties:
+        number:
+          type: integer
+          description: The Alert Group's number alone, without `#`, as a field of its own, because `#N` in text
+            becomes a hashtag in some messengers.
+        title:
+          type: string
+          description: The Alert Group's title without the number.
+        status:
+          $ref: '#/components/schemas/LayoutStatus'
+        fields:
+          type: array
+          description: Severity, Route, Teams (left out when the Alert Group has none) and Started, in order.
+          items:
+            $ref: '#/components/schemas/LayoutField'
+        summary:
+          type: string
+          description: The Alert Group's summary; empty when there is none, or when shortening removed it.
+        description:
+          type: string
+          description: The `description` annotation of the first Alert that has one; empty when there is none, or when
+            shortening removed it.
+        labels:
+          type: array
+          description: The key labels the Route shows in its messages, each as key and value; the value of a label
+            whose values differ among the firing Alerts says how many there are, "3 values" in the Route's language.
+          items:
+            $ref: '#/components/schemas/LayoutLabel'
+        alerts:
+          description: The Alerts by the label that tells them apart; null for an Alert Group of one Alert, or when
+            shortening removed them.
+          oneOf:
+          - $ref: '#/components/schemas/LayoutAlerts'
+          - type: 'null'
+        notices:
+          type: array
+          description: The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the
+            Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line.
+          items:
+            type: string
+        assignees:
+          type: array
+          description: The people Paged for the Alert Group, before an acknowledgement; empty until Muster Pages people
+            through Escalation chains.
+          items:
+            $ref: '#/components/schemas/LayoutPerson'
+        owner:
+          description: Who acknowledged the Alert Group, while it is acknowledged; null otherwise.
+          oneOf:
+          - $ref: '#/components/schemas/LayoutPerson'
+          - type: 'null'
+        links:
+          type: array
+          description: The links, "Open in Muster" to the Alert Group page first.
+          items:
+            $ref: '#/components/schemas/LayoutLink'
+    LayoutStatus:
+      type: object
+      required:
+      - key
+      - word
+      properties:
+        key:
+          type: string
+          enum:
+          - firing
+          - acknowledged
+          - snoozed
+          - resolved
+        word:
+          type: string
+          description: The status as a word in the Route's language, "Firing".
+    LayoutField:
+      type: object
+      required:
+      - name
+      - value
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+    LayoutLabel:
+      type: object
+      required:
+      - key
+      - value
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+    LayoutAlerts:
+      type: object
+      required:
+      - label
+      - values
+      - total
+      properties:
+        label:
+          type: string
+          description: The label that tells the Alerts apart.
+        values:
+          type: array
+          description: Its values, firing Alerts first, at most as many as Muster lists in a message.
+          items:
+            $ref: '#/components/schemas/LayoutAlertValue'
+        total:
+          type: integer
+          description: How many Alerts the Alert Group has, listed or not, so that the bridge counts the ones it does
+            not show itself — "…and 7 more" — also when it lists fewer values than `values` holds.
+    LayoutAlertValue:
+      type: object
+      required:
+      - value
+      - resolved
+      properties:
+        value:
+          type: string
+        resolved:
+          type: boolean
+          description: The Alert is resolved; Muster strikes its value through in `body`.
+    LayoutPerson:
+      type: object
+      required:
+      - name
+      - ref
+      properties:
+        name:
+          type: string
+          description: The person's display name in Muster, which may differ from the `display_name` of their entry in
+            `mentions`, the name of their account in the messenger.
+        ref:
+          type:
+          - string
+          - 'null'
+          pattern: ^[a-z0-9]{1,16}$
+          description: The `ref` of the person's entry in `mentions` where the message carries their Mention — a new
+            message to a bridge with `native_mentions`, for a person whose account is linked through the Connection —
+            so that the bridge mentions them by its own user id; null otherwise, and always in an edit.
+        team:
+          type: object
+          description: The person's Team, where Muster knows it.
+          required:
+          - name
+          properties:
+            name:
+              type: string
+    LayoutLink:
+      type: object
+      required:
+      - label
+      - url
+      properties:
+        label:
+          type: string
+        url:
+          type: string
+          description: An absolute http or https link as the Route gives it, the same as the body links; it may be an
+            IRI, with characters outside ASCII in its host or path.
     MessageInput:
       allOf:
       - $ref: '#/components/schemas/MessageContent'
@@ -967,6 +1159,40 @@ components:
           external_id: u-alice
           display_name: Alice Smith
         notify: true
+        layout:
+          number: 42
+          title: HighErrorRate
+          status:
+            key: firing
+            word: Firing
+          fields:
+          - name: Severity
+            value: critical
+          - name: Route
+            value: payments
+          - name: Started
+            value: 2026-10-09 14:03 UTC
+          summary: Error rate above 5 %
+          description: ''
+          labels:
+          - key: namespace
+            value: payments
+          alerts:
+            label: pod
+            values:
+            - value: api-7f9c
+              resolved: false
+            - value: api-5d2a
+              resolved: false
+            total: 2
+          notices: []
+          assignees: []
+          owner: null
+          links:
+          - label: Open in Muster
+            url: https://muster.example.org/alert-groups/AGK7M3QX9P2RTA
+          - label: Runbook
+            url: https://wiki.example.org/runbooks/high-error-rate
     MessagePosted:
       type: object
       required:

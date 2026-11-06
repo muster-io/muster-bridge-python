@@ -124,38 +124,56 @@ class MessageKind(StrEnum):
     test = "test"
 
 
-class MessageContent(BaseModel):
-    status: Status
-    color: str = Field(
-        ..., description="The colour of the status, for messengers that colour messages.", pattern="^#[0-9a-f]{6}$"
-    )
-    emoji: str = Field(
-        ...,
-        description="The status as an emoji (🔴 🟠 ⚪ 🟢 ⛈), for messengers without colours.",
-        max_length=8,
-        min_length=1,
-    )
-    title: str = Field(
-        ...,
-        description="`#N` and the Alert Group's title, plain text; shown as the heading and linked to `link`.",
-        max_length=512,
-        min_length=1,
-    )
-    link: Link
-    body: str = Field(
-        ...,
-        description="CommonMark, as the description of this protocol says; at most `limits.max_body_length` code points.",
-    )
-    buttons: list[Button] = Field(
-        ..., description="In order. Empty when the message has none, always empty without `capabilities.buttons`."
-    )
+class LayoutStatusKey(StrEnum):
+    firing = "firing"
+    acknowledged = "acknowledged"
+    snoozed = "snoozed"
+    resolved = "resolved"
 
 
-class MessageInput(MessageContent):
-    channel_id: str = Field(..., max_length=512, min_length=1)
-    kind: MessageKind
-    mentions: list[Mention]
-    notify: bool = Field(..., description="Loud (`true`) or Quiet (`false`).")
+class LayoutStatus(BaseModel):
+    key: LayoutStatusKey
+    word: str = Field(..., description='The status as a word in the Route\'s language, "Firing".')
+
+
+class LayoutField(BaseModel):
+    name: str
+    value: str
+
+
+class LayoutLabel(BaseModel):
+    key: str
+    value: str
+
+
+class LayoutAlertValue(BaseModel):
+    value: str
+    resolved: bool = Field(..., description="The Alert is resolved; Muster strikes its value through in `body`.")
+
+
+class LayoutPersonTeam(BaseModel):
+    name: str
+
+
+class LayoutPerson(BaseModel):
+    name: str = Field(
+        ...,
+        description="The person's display name in Muster, which may differ from the `display_name` of their entry in `mentions`, the name of their account in the messenger.",
+    )
+    ref: str | None = Field(
+        ...,
+        description="The `ref` of the person's entry in `mentions` where the message carries their Mention — a new message to a bridge with `native_mentions`, for a person whose account is linked through the Connection — so that the bridge mentions them by its own user id; null otherwise, and always in an edit.",
+        pattern="^[a-z0-9]{1,16}$",
+    )
+    team: LayoutPersonTeam | None = Field(default=None, description="The person's Team, where Muster knows it.")
+
+
+class LayoutLink(BaseModel):
+    label: str
+    url: str = Field(
+        ...,
+        description="An absolute http or https link as the Route gives it, the same as the body links; it may be an IRI, with characters outside ASCII in its host or path.",
+    )
 
 
 class MessagePosted(BaseModel):
@@ -392,6 +410,17 @@ class Capabilities(BaseModel):
     )
 
 
+class LayoutAlerts(BaseModel):
+    label: str = Field(..., description="The label that tells the Alerts apart.")
+    values: list[LayoutAlertValue] = Field(
+        ..., description="Its values, firing Alerts first, at most as many as Muster lists in a message."
+    )
+    total: int = Field(
+        ...,
+        description='How many Alerts the Alert Group has, listed or not, so that the bridge counts the ones it does not show itself — "…and 7 more" — also when it lists fewer values than `values` holds.',
+    )
+
+
 class EventBatch(BaseModel):
     events: list[Event]
     next_cursor: str = Field(
@@ -441,3 +470,77 @@ class Info(BaseModel):
         max_length=1024,
         pattern="^https?://\\S*\\{token\\}\\S*$",
     )
+
+
+class Layout(BaseModel):
+    number: int = Field(
+        ...,
+        description="The Alert Group's number alone, without `#`, as a field of its own, because `#N` in text becomes a hashtag in some messengers.",
+    )
+    title: str = Field(..., description="The Alert Group's title without the number.")
+    status: LayoutStatus
+    fields: list[LayoutField] = Field(
+        ..., description="Severity, Route, Teams (left out when the Alert Group has none) and Started, in order."
+    )
+    summary: str = Field(
+        ..., description="The Alert Group's summary; empty when there is none, or when shortening removed it."
+    )
+    description: str = Field(
+        ...,
+        description="The `description` annotation of the first Alert that has one; empty when there is none, or when shortening removed it.",
+    )
+    labels: list[LayoutLabel] = Field(
+        ...,
+        description='The key labels the Route shows in its messages, each as key and value; the value of a label whose values differ among the firing Alerts says how many there are, "3 values" in the Route\'s language.',
+    )
+    alerts: LayoutAlerts | None = Field(
+        ...,
+        description="The Alerts by the label that tells them apart; null for an Alert Group of one Alert, or when shortening removed them.",
+    )
+    notices: list[str] = Field(
+        ...,
+        description='The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line.',
+    )
+    assignees: list[LayoutPerson] = Field(
+        ...,
+        description="The people Paged for the Alert Group, before an acknowledgement; empty until Muster Pages people through Escalation chains.",
+    )
+    owner: LayoutPerson | None = Field(
+        ..., description="Who acknowledged the Alert Group, while it is acknowledged; null otherwise."
+    )
+    links: list[LayoutLink] = Field(..., description='The links, "Open in Muster" to the Alert Group page first.')
+
+
+class MessageContent(BaseModel):
+    status: Status
+    color: str = Field(
+        ..., description="The colour of the status, for messengers that colour messages.", pattern="^#[0-9a-f]{6}$"
+    )
+    emoji: str = Field(
+        ...,
+        description="The status as an emoji (🔴 🟠 ⚪ 🟢 ⛈), for messengers without colours.",
+        max_length=8,
+        min_length=1,
+    )
+    title: str = Field(
+        ...,
+        description="`#N` and the Alert Group's title, plain text; shown as the heading and linked to `link`.",
+        max_length=512,
+        min_length=1,
+    )
+    link: Link
+    body: str = Field(
+        ...,
+        description="CommonMark, as the description of this protocol says; at most `limits.max_body_length` code points.",
+    )
+    buttons: list[Button] = Field(
+        ..., description="In order. Empty when the message has none, always empty without `capabilities.buttons`."
+    )
+    layout: Layout | None = None
+
+
+class MessageInput(MessageContent):
+    channel_id: str = Field(..., max_length=512, min_length=1)
+    kind: MessageKind
+    mentions: list[Mention]
+    notify: bool = Field(..., description="Loud (`true`) or Quiet (`false`).")
