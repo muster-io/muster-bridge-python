@@ -475,19 +475,19 @@ async def test_refuses_requests_that_do_not_match_the_models(
     assert bridge.messenger.calls == []
 
 
-async def test_refuses_a_body_over_1_mib(bridge: Harness) -> None:
+async def test_refuses_a_body_over_4_mib(bridge: Harness) -> None:
     def padded(n: int) -> str:
         return POST_BODY + " " * (n - len(POST_BODY))
 
-    assert (await bridge.call("POST", "/v1/messages", key="k1", body=padded(1 << 20))).status_code == 201
-    response = await bridge.call("POST", "/v1/messages", key="k2", body=padded((1 << 20) + 1))
+    assert (await bridge.call("POST", "/v1/messages", key="k1", body=padded(4 << 20))).status_code == 201
+    response = await bridge.call("POST", "/v1/messages", key="k2", body=padded((4 << 20) + 1))
     assert (
-        problem_of(response, 400, "invalid")["detail"] == "The request body exceeds 1 MiB, the most this bridge reads."
+        problem_of(response, 400, "invalid")["detail"] == "The request body exceeds 4 MiB, the most this bridge reads."
     )
     assert bridge.messenger.count("post_message") == 1
 
 
-async def test_stops_reading_a_body_past_1_mib(bridge: Harness) -> None:
+async def test_stops_reading_a_body_past_4_mib(bridge: Harness) -> None:
     chunk = 1 << 16
     received = 0
     sent: list[dict[str, Any]] = []
@@ -517,9 +517,9 @@ async def test_stops_reading_a_body_past_1_mib(bridge: Harness) -> None:
     }
     async with asyncio.timeout(10):  # a guard against reading for ever, not a wait
         await bridge.app(scope, cast("Any", receive), cast("Any", send))
-    assert received == (1 << 20) // chunk + 1
+    assert received == (4 << 20) // chunk + 1
     assert sent[0]["status"] == 400
-    assert json.loads(sent[1]["body"])["detail"] == "The request body exceeds 1 MiB, the most this bridge reads."
+    assert json.loads(sent[1]["body"])["detail"] == "The request body exceeds 4 MiB, the most this bridge reads."
     assert bridge.messenger.count("post_message") == 0
 
 
@@ -989,9 +989,3 @@ async def test_the_messenger_gets_the_layout_that_muster_sent_and_none_without_i
         assert (await bridge.call(method, path, key=key and "k2", body=with_layout(plain))).is_success
     got = [cast(MessageContent, call.payload).layout for call in bridge.messenger.calls]
     assert [layout and layout.model_dump(mode="json") for layout in got] == [None, LAYOUT, None, LAYOUT]
-
-
-async def test_a_layout_that_does_not_match_the_specification_is_invalid(bridge: Harness) -> None:
-    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_layout(POST_BODY, {"number": "42"}))
-    problem_of(response, 400, "invalid")
-    assert bridge.messenger.count("post_message") == 0

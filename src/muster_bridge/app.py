@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import hmac
 import json
+import logging
 import os
 import re
 import traceback
@@ -95,8 +96,13 @@ if TYPE_CHECKING:
 
 __all__ = ["BridgeApp", "ClosedError"]
 
-MAX_REQUEST_BYTES = 1 << 20
-"""The library's cap on a request body, which leaves room for any max_body_length it accepts."""
+MAX_REQUEST_BYTES = 4 << 20
+"""The library's cap on a request body, which leaves room for any max_body_length it accepts.
+
+The layout repeats the body's content, and Muster's JSON escaping writes up to 6 bytes for one character (\\u003c for
+<, >, &, U+2028 and control characters). At a max_body_length of 100000 that is about 600 KB per copy of the content
+and so about 1.2 MB per request with the body and the layout, which already exceeds 1 MiB; 4 MiB leaves a wide margin.
+"""
 MAX_CHANNEL_NAME = 200
 KEY_CLAIM_TTL = timedelta(minutes=2)
 KEY_RETENTION = timedelta(hours=24)
@@ -209,8 +215,12 @@ class _Call:
             where = "path" if name == self.op.param else "query"
             raise _Refusal("invalid", f"{_MISMATCH}parameter {name} in {where}: {first['msg']}.") from None
 
-    async def body(self, model: type[_M]) -> _M:
-        """Return the body of the request, at most 1 MiB, validated with the model, or refuse it."""
+    async def body(self, model: type[_M], log: logging.Logger | None = None) -> _M:
+        """Return the body of the request, at most 4 MiB, validated with the model, or refuse it.
+
+        A layout that does not match the specification, or that is null, is dropped for a message and logged, and the
+        message is accepted without it; an error anywhere else refuses the request.
+        """
         data = bytearray()
         too_long = False
         try:
@@ -222,18 +232,60 @@ class _Call:
         except Exception:  # a client that left, or a server that could not read
             raise _Refusal("invalid", "Reading the request body failed.") from None
         if too_long:
-            raise _Refusal("invalid", "The request body exceeds 1 MiB, the most this bridge reads.")
+            raise _Refusal("invalid", "The request body exceeds 4 MiB, the most this bridge reads.")
         if not data:
             raise _Refusal("invalid", f"{_MISMATCH}body: value is required but missing.")
         if self.request.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
             raise _Refusal("invalid", f"{_MISMATCH}body: header Content-Type is not application/json.")
         try:
-            return model.model_validate_json(bytes(data), strict=True)
+            parsed = model.model_validate_json(bytes(data), strict=True)
         except ValidationError as error:
-            first = error.errors(include_url=False, include_input=False, include_context=False)[0]
+            errors = error.errors(include_url=False, include_input=False, include_context=False)
+            first = errors[0]
+            if issubclass(model, MessageContent) and all(e["loc"][:1] == ("layout",) for e in errors):
+                reason = f"{json_pointer(first['loc'])}: {first['msg']}"
+                raw = json.loads(bytes(data))
+                del raw["layout"]
+                parsed = model.model_validate_json(json.dumps(raw), strict=True)
+                self._drop_layout(parsed, reason, log)
+                return parsed
             pointer = json_pointer(first["loc"])
             where = f"body {pointer}" if pointer else "body"
             raise _Refusal("invalid", f"{_MISMATCH}{where}: {first['msg']}.") from None
+        if isinstance(parsed, MessageContent) and (null_at := null_layout_field(parsed)):
+            self._drop_layout(parsed, null_at, log)
+        return parsed
+
+    def _drop_layout(self, message: BaseModel, reason: str, log: logging.Logger | None) -> None:
+        """Remove the layout of a message and log why, never with any of the message's content."""
+        content = cast("MessageContent", message)
+        content.layout = None
+        content.model_fields_set.discard("layout")
+        if log is not None:
+            log.warning(
+                "the layout of a message was dropped and the message accepted without it: operation=%s bot=%s "
+                "reason=%s",
+                self.op.op_id,
+                self.bot,
+                reason,
+            )
+
+
+def null_layout_field(message: MessageContent) -> str | None:
+    """Return where the layout of a message holds a null that the specification allows only as absent, or None.
+
+    The models give an absent field and a null one the same value; the fields set tell them apart.
+    """
+    if "layout" in message.model_fields_set and message.layout is None:
+        return "/layout: must be absent, not null"
+    layout = message.layout
+    if layout is None:
+        return None
+    people = [("owner", layout.owner), *((f"assignees/{i}", who) for i, who in enumerate(layout.assignees))]
+    for where, who in people:
+        if who is not None and "team" in who.model_fields_set and who.team is None:
+            return f"/layout/{where}/team: must be absent, not null"
+    return None
 
 
 def check_buttons(buttons: Sequence[Button], capabilities: CapabilitiesButtons | None) -> str | None:
@@ -774,13 +826,13 @@ class BridgeApp:
             raise _Refusal("invalid", detail)
 
     async def _post_message(self, call: _Call) -> object:
-        message = await call.body(MessageInput)
+        message = await call.body(MessageInput, self._log)
         self._check_content(message.body, message.buttons)
         return await self._messenger.post_message(call.bot, message)
 
     async def _edit_message(self, call: _Call) -> object:
         message_id = call.params(EditMessageParameters).message_id
-        content = await call.body(MessageContent)
+        content = await call.body(MessageContent, self._log)
         self._check_content(content.body, content.buttons)
         return await self._messenger.edit_message(call.bot, message_id, content)
 

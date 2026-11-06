@@ -157,7 +157,10 @@ reach Muster late.
    `capabilities.direct_messages`) and `Deleter` (`delete_message`, for `capabilities.delete`). `BridgeApp` raises
    `ConfigError` for a configuration whose features lack their methods, or whose `info` would not match the protocol,
    naming every reason. The library validates every request against the models generated from the protocol before it
-   calls a method, and every answer before it sends it.
+   calls a method, and every answer before it sends it. A `layout` that does not match the protocol — a `status.key` Muster adds later, a missing `ref`, a `null` where the
+   protocol allows only an absent field — does not refuse the message: the library drops it, so that `message.layout` is
+   `None` and the bridge renders `body`, and logs one warning with the place and the reason, never the message's text.
+   An error anywhere else is still answered as `invalid`. The library reads a request of at most 4 MiB.
 2. Answer the messenger's failures by raising `Transient`, `RateLimited` (with the wait `retry_after` in seconds, which
    it requires because Muster waits exactly that long, and `scope` `channel` or `bot`), `Gone` (with
    `edit_window_closed=True` for an edit the messenger refuses only for the message's age), `Forbidden` or `Invalid`,
