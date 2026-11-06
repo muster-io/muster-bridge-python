@@ -61,7 +61,7 @@ from muster_bridge.models import (
 from muster_bridge.problems import BridgeError, Forbidden, Gone, Invalid, RateLimited, Transient
 from muster_bridge.store import KeyClaim, KeyState, MemoryStore, Store, StoredAnswer, StoredEvent, UnknownCursorError
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "AnswerShownShownAs",
