@@ -258,7 +258,9 @@ class _Call:
 
     def _drop_layout(self, message: BaseModel, reason: str, log: logging.Logger | None) -> None:
         """Remove the layout of a message and log why, never with any of the message's content."""
-        cast("MessageContent", message).layout = None
+        content = cast("MessageContent", message)
+        content.layout = None
+        content.model_fields_set.discard("layout")
         if log is not None:
             log.warning(
                 "the layout of a message was dropped and the message accepted without it: operation=%s bot=%s "

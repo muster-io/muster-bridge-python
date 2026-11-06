@@ -18,6 +18,7 @@ from muster_bridge import (
     LayoutLink,
     LayoutPerson,
     LayoutStatus,
+    Limits,
     MessageContent,
     MessageEdited,
     MessageInput,
@@ -199,33 +200,52 @@ async def test_a_layout_that_does_not_match_is_dropped_and_the_message_accepted(
     assert len(bridge.messenger.calls) == 5
 
 
+ROUTES = (("POST", "/v1/messages", POST_BODY), ("PATCH", "/v1/messages/m1", EDIT_BODY))
+
+
 async def test_a_layout_that_is_null_is_dropped_and_the_message_accepted(
     bridge: Harness, caplog: pytest.LogCaptureFixture
 ) -> None:
-    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_layout(POST_BODY, "null"))
-    assert response.status_code == 201, response.text
-    payload = bridge.messenger.calls[-1].payload
-    assert isinstance(payload, MessageContent)
-    assert payload.layout is None
-    assert "/layout: must be absent, not null" in next(
-        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
-    )
-
-
-async def test_a_team_that_is_null_drops_the_layout(bridge: Harness, caplog: pytest.LogCaptureFixture) -> None:
-    for i, layout in enumerate(
-        (
-            {**LAYOUT, "owner": {"name": "Alice Smith", "ref": "m1", "team": None}},
-            {**LAYOUT, "assignees": [{"name": "Bob", "ref": None, "team": None}]},
-        )
-    ):
+    for method, path, plain in ROUTES:
         caplog.clear()
-        response = await bridge.call("POST", "/v1/messages", key=f"k{i}", body=with_layout(POST_BODY, layout))
-        assert response.status_code == 201, response.text
+        response = await bridge.call(method, path, key="k1", body=with_layout(plain, "null"))
+        assert response.is_success, response.text
         payload = bridge.messenger.calls[-1].payload
         assert isinstance(payload, MessageContent)
         assert payload.layout is None
-        assert "team: must be absent, not null" in "\n".join(r.getMessage() for r in caplog.records)
+        assert "/layout: must be absent, not null" in next(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+
+
+async def test_a_team_that_is_null_drops_the_layout(bridge: Harness, caplog: pytest.LogCaptureFixture) -> None:
+    for method, path, plain in ROUTES:
+        for layout in (
+            {**LAYOUT, "owner": {"name": "Alice Smith", "ref": "m1", "team": None}},
+            {**LAYOUT, "assignees": [{"name": "Bob", "ref": None, "team": None}]},
+        ):
+            caplog.clear()
+            response = await bridge.call(
+                method, path, key="k1" + str(len(bridge.messenger.calls)), body=with_layout(plain, layout)
+            )
+            assert response.is_success, response.text
+            payload = bridge.messenger.calls[-1].payload
+            assert isinstance(payload, MessageContent)
+            assert payload.layout is None
+            assert "team: must be absent, not null" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_a_dropped_layout_looks_absent_to_the_messenger(bridge: Harness) -> None:
+    broken = {k: v for k, v in LAYOUT.items() if k != "number"}
+    layouts: tuple[dict[str, Any] | str, ...] = (broken, "null")
+    for i, layout in enumerate(layouts):
+        for method, path, plain in ROUTES:
+            response = await bridge.call(method, path, key=f"k{i}", body=with_layout(plain, layout))
+            assert response.is_success, response.text
+            payload = bridge.messenger.calls[-1].payload
+            assert isinstance(payload, MessageContent)
+            assert "layout" not in payload.model_fields_set
+            assert "layout" not in payload.model_dump(exclude_unset=True)
 
 
 async def test_a_ref_and_an_owner_that_are_null_stay_valid(bridge: Harness) -> None:
@@ -254,9 +274,24 @@ async def test_a_body_that_does_not_match_is_still_refused_beside_a_good_layout(
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
-async def test_a_request_of_2_5_mb_is_accepted(bridge: Harness) -> None:
-    body = with_layout(POST_BODY)
-    padded = body.removesuffix("}") + " " * (2_500_000 - len(body)) + "}"
-    assert len(padded) == 2_500_000
-    response = await bridge.call("POST", "/v1/messages", key="k1", body=padded)
+async def test_a_request_of_2_5_mb_of_escaped_text_is_accepted(make_bridge: MakeBridge) -> None:
+    """Muster writes < > & as \\u003c and so on: 6 bytes for one character, in the body and again in the layout."""
+    escaped = "\\u003c" * 100_000
+    layout = {
+        **LAYOUT,
+        "fields": [{"name": "Severity", "value": "VALUE"}],
+        "summary": "SUMMARY",
+        "description": "SUMMARY",
+    }
+    text = json.dumps(layout).replace("VALUE", escaped).replace("SUMMARY", escaped)
+    body = POST_BODY.replace('"body":"b"', f'"body":"{escaped}"')
+    request = with_layout(body, text)
+    assert 2_000_000 < len(request) < 2_600_000
+    bridge = await make_bridge(limits=Limits(max_body_length=100_000, edit_max_age_seconds=None))
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=request)
     assert response.status_code == 201, response.text
+    payload = bridge.messenger.calls[-1].payload
+    assert isinstance(payload, MessageContent)
+    assert payload.body == "<" * 100_000
+    assert payload.layout is not None
+    assert payload.layout.summary == payload.layout.description == "<" * 100_000
