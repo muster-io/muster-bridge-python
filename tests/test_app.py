@@ -685,7 +685,7 @@ async def test_invalid_messenger_answer(bridge: Harness, caplog: pytest.LogCaptu
             ANSWER_BODY,
             "answer",
             "banner",
-            "/shown_as: Input should be 'ephemeral', 'popup', 'thread' or 'direct'",
+            "/shown_as: Input should be 'ephemeral', 'popup', 'thread', 'direct' or 'notification'",
             id="unknown place",
         ),
     ],

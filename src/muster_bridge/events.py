@@ -17,7 +17,15 @@ from pydantic import BaseModel, ValidationError
 
 from muster_bridge.config import to_json_object
 from muster_bridge.messenger import ReportedEvent
-from muster_bridge.models import AccountLinkEvent, Event, MessageDeletedEvent, Person, PressEvent, ThreadMessageEvent
+from muster_bridge.models import (
+    AccountLinkEvent,
+    Event,
+    MessageDeletedEvent,
+    NotificationAcknowledgedEvent,
+    Person,
+    PressEvent,
+    ThreadMessageEvent,
+)
 from muster_bridge.problems import describe, encode_json, validation_problem
 from muster_bridge.store import StoredEvent
 
@@ -263,7 +271,8 @@ class Events:
     async def find(self, bot: str, wanted: str) -> tuple[ReportedEvent, str | None] | None:
         """Return the kept event that answerEvent names, with its Account link token, or None.
 
-        None also for a deleted message, which no person caused. Raise StoredEventError for a stored body that is not
+        None also for a deleted message, which no person caused, and for a gateway's notification_acknowledged, which
+        this messenger-only library never reports. Raise StoredEventError for a stored body that is not
         an event's.
         """
         stored = await self._store.find_event(bot, wanted, self._clock.now())
@@ -273,7 +282,7 @@ class Events:
             event = Event.model_validate_json(stored.body, strict=True).root
         except ValidationError:
             raise StoredEventError("a stored event is not the JSON of an event") from None
-        if isinstance(event, MessageDeletedEvent):
+        if isinstance(event, MessageDeletedEvent | NotificationAcknowledgedEvent):
             return None
         reported = ReportedEvent(
             id=event.id,

@@ -28,13 +28,26 @@ info:
     **Ids in paths.** `message_id` and `channel_id` are opaque strings of up to 512 characters; Muster percent-encodes
     each as one path segment, and the bridge decodes it.
 
-    **What every bridge implements.** `getInfo`, `postMessage`, `editMessage`, `replyInThread`, `checkChannel`,
-    `answerEvent`, and inbound events through `pollEvents` or the `bridgeEvent` push, or both — at least `account_link`
-    events, because every bridge takes Account link tokens. Everything else is optional and declared in
-    `info.capabilities`: Muster never calls an operation the bridge did not declare and never sends a button to a bridge
-    without `buttons`. A bridge sends `press` events only with `buttons`, `thread_message` events only with
+    **Roles.** `info.roles` declares what the bridge is: `messenger`, the default when it declares none, a bridge to a
+    messenger whose channels are Destinations in Muster; `gateway`, a Notification gateway, which reaches people outside
+    messengers, by phone call or SMS for example; or both. A bridge whose only role is `gateway` cannot be a Destination
+    and is not offered for Account links.
+
+    **What every bridge in the role `messenger` implements.** `getInfo`, `postMessage`, `editMessage`, `replyInThread`,
+    `checkChannel`, `answerEvent`, and inbound events through `pollEvents` or the `bridgeEvent` push, or both — at least
+    `account_link` events, because every such bridge takes Account link tokens. Everything else is optional and
+    declared in `info.capabilities`: Muster never calls an operation the bridge did not declare and never sends a button
+    to a bridge without `buttons`. A bridge sends `press` events only with `buttons`, `thread_message` events only with
     `thread_messages` and `message_deleted` events only with `deletion_events`; Muster handles every event type of this
     protocol whatever its copy of `info` says, so an event sent just after a feature was switched on is not lost.
+
+    **What every bridge in the role `gateway` implements.** `getInfo`; `sendNotification`, which Muster calls only for a
+    bridge that declares `gateway`; `answerEvent`; and inbound events in at least one delivery mode, of which it sends
+    `notification_acknowledged` when the person acknowledges a notification. During a phone call the answer must reach
+    the person while they are still on the line, which needs the push mode: Muster answers a pushed event before it
+    answers the push. A gateway that is not also a messenger still sends every required member of `info`:
+    `messenger.name` names its provider, `capabilities` its features, none of a messenger's, `user_lookup` is `none`,
+    `event_delivery` lists its modes and `limits` its limits.
 
     **Rendering.** Muster sends a JSON envelope and the bridge renders it in its messenger's markup. The `body` is
     CommonMark 0.31 with one extension, strikethrough (`~~text~~`) as GitHub Flavored Markdown writes it. Muster uses
@@ -100,8 +113,11 @@ tags:
   description: Looking people up and messaging them directly, for Account links.
 - name: Answers
   description: Answers to the person behind an event.
+- name: Notifications
+  description: Notifications to people outside messengers, sent through a bridge in the role `gateway`.
 - name: Events
-  description: Presses, Thread messages, Account link requests and deleted messages, polled by Muster or pushed to it.
+  description: Presses, Thread messages, Account link requests, deleted messages and acknowledged notifications, polled
+    by Muster or pushed to it.
 paths:
   /v1/info:
     get:
@@ -364,13 +380,15 @@ paths:
       tags:
       - Answers
       summary: Answer the person behind an event
-      description: 'Muster''s answer to a press, a Text command or an Account link request: a refusal, "Done: Acknowledged
-        #42", "Linked to Muster user …". The bridge shows `text` to the person who caused the event `event_id` and says
-        where: an answer to a press privately when its messenger allows that (`private_answers`) and the press is recent
-        enough, otherwise in the Thread of the message; an answer to a `thread_message` in that Thread, never as a
-        pop-up; an answer to an `account_link` in the direct chat it came from. Muster calls it within a few seconds of
-        receiving the event and before acknowledging it, or not at all; an event the bridge no longer knows, or can no
-        longer answer anywhere, is `gone`.'
+      description: 'Muster''s answer to a press, a Text command, an Account link request or an acknowledged
+        notification: a refusal, "Done: Acknowledged #42", "Linked to Muster user …", "Already taken by Alice". The
+        bridge shows `text` to the person who caused the event `event_id` and says where: an answer to a press privately
+        when its messenger allows that (`private_answers`) and the press is recent enough, otherwise in the Thread of
+        the message; an answer to a `thread_message` in that Thread, never as a pop-up; an answer to an `account_link`
+        in the direct chat it came from; an answer to a `notification_acknowledged` in the call, read out while the
+        person is on the line, or in the reply to the message. Muster calls it within a few seconds of receiving the
+        event and before acknowledging it, or not at all; an event the bridge no longer knows, or can no longer answer
+        anywhere, is `gone`.'
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -392,6 +410,44 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Transient'
+  /v1/notifications:
+    post:
+      operationId: sendNotification
+      tags:
+      - Notifications
+      summary: Send a notification to a person (role gateway)
+      description: 'Muster calls it only for a bridge whose `info.roles` contains `gateway`. The bridge reaches the
+        person at `contact`, an address it understands, such as a phone number, and reads `text` out or sends it as
+        plain text, as its provider can, in `language`. With `action`, the person can acknowledge, as `action.label`
+        tells them; the bridge then sends the event `notification_acknowledged` with `action.data` unchanged, and shows
+        Muster''s `answerEvent` to them, during the call when it is a call. Without `action` there is nothing to
+        acknowledge, as for a confirmation code. A contact the provider refuses for good is `invalid`; credentials the
+        provider refuses are `forbidden`.'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationInput'
+      responses:
+        '201':
+          description: Sent, or the first result of the same `Idempotency-Key` with `replayed`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSent'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -695,6 +751,21 @@ components:
             the Connection check.
           pattern: ^https?://\S*\{token\}\S*$
           maxLength: 1024
+        roles:
+          type: array
+          description: What the bridge is (see Roles); `messenger` when it is missing, so a bridge written before roles
+            existed is a messenger.
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/InfoRole'
+    InfoRole:
+      type: string
+      description: '`messenger`: a bridge to a messenger, whose channels are Destinations; `gateway`: a Notification
+        gateway, which Muster calls with `sendNotification`.'
+      enum:
+      - messenger
+      - gateway
     Capabilities:
       type: object
       description: The optional features of the bridge. A missing member means the feature is not offered.
@@ -1351,6 +1422,64 @@ components:
           type: string
         replayed:
           type: boolean
+    NotificationInput:
+      type: object
+      required:
+      - contact
+      - text
+      - language
+      properties:
+        contact:
+          type: string
+          description: Where the bridge reaches the person, as they entered it in Muster and the bridge understands it,
+            such as a phone number.
+          minLength: 1
+          maxLength: 200
+        text:
+          type: string
+          description: Plain text, which the bridge reads out or sends as it can.
+          minLength: 1
+          maxLength: 1000
+        language:
+          type: string
+          description: The language of the person, which the text is in.
+          enum:
+          - en
+          - ru
+        action:
+          $ref: '#/components/schemas/NotificationAction'
+    NotificationAction:
+      type: object
+      description: How the person acknowledges the notification. Absent when there is nothing to acknowledge, as for a
+        confirmation code.
+      required:
+      - data
+      - label
+      properties:
+        data:
+          type: string
+          description: Opaque, signed by Muster like a button's data; return it unchanged with
+            `notification_acknowledged`.
+          pattern: ^[!-~]{1,64}$
+        label:
+          type: string
+          description: How the person acknowledges, in their language, such as "Press 1 to acknowledge"; the bridge may
+            say it in its own words.
+          minLength: 1
+          maxLength: 200
+    NotificationSent:
+      type: object
+      required:
+      - notification_id
+      - replayed
+      properties:
+        notification_id:
+          type: string
+          description: Names the notification in its `notification_acknowledged`; opaque to Muster.
+          minLength: 1
+          maxLength: 512
+        replayed:
+          type: boolean
     AnswerInput:
       type: object
       required:
@@ -1373,12 +1502,14 @@ components:
       properties:
         shown_as:
           type: string
-          description: Where the person sees the answer.
+          description: Where the person sees the answer; `notification` is told in the call or in the reply to the
+            message of a notification.
           enum:
           - ephemeral
           - popup
           - thread
           - direct
+          - notification
         replayed:
           type: boolean
     EventBatch:
@@ -1491,14 +1622,37 @@ components:
             const: message_deleted
           message_id:
             type: string
+    NotificationAcknowledgedEvent:
+      allOf:
+      - $ref: '#/components/schemas/EventBase'
+      - type: object
+        description: The person acknowledged a notification that carried `action`, as its `label` told them; sent only
+          by a bridge in the role `gateway`, only for a `sendNotification` of Muster.
+        required:
+        - notification_id
+        - data
+        properties:
+          type:
+            const: notification_acknowledged
+          notification_id:
+            type: string
+            description: The `notification_id` that `sendNotification` answered.
+            minLength: 1
+            maxLength: 512
+          data:
+            type: string
+            description: The notification's `action.data`, unchanged.
+            pattern: ^[!-~]{1,64}$
     Event:
-      description: One event; `type` selects the variant. `account_link` events are always sent; the others only with
-        the feature they belong to (`buttons`, `thread_messages`, `deletion_events`).
+      description: One event; `type` selects the variant. A bridge in the role `messenger` always sends `account_link`
+        events and the others only with the feature they belong to (`buttons`, `thread_messages`, `deletion_events`);
+        a bridge in the role `gateway` sends `notification_acknowledged`.
       oneOf:
       - $ref: '#/components/schemas/PressEvent'
       - $ref: '#/components/schemas/ThreadMessageEvent'
       - $ref: '#/components/schemas/AccountLinkEvent'
       - $ref: '#/components/schemas/MessageDeletedEvent'
+      - $ref: '#/components/schemas/NotificationAcknowledgedEvent'
       discriminator:
         propertyName: type
         mapping:
@@ -1506,6 +1660,7 @@ components:
           thread_message: '#/components/schemas/ThreadMessageEvent'
           account_link: '#/components/schemas/AccountLinkEvent'
           message_deleted: '#/components/schemas/MessageDeletedEvent'
+          notification_acknowledged: '#/components/schemas/NotificationAcknowledgedEvent'
     Problem:
       type: object
       description: RFC 9457 problem details with the Bridge protocol's members.
