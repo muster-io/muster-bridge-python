@@ -40,6 +40,11 @@ class InfoEventDelivery(StrEnum):
     push = "push"
 
 
+class InfoRole(StrEnum):
+    messenger = "messenger"
+    gateway = "gateway"
+
+
 class CapabilitiesThreadMessages(StrEnum):
     all = "all"
     mentions_only = "mentions_only"
@@ -255,6 +260,35 @@ class DirectMessageSent(BaseModel):
     replayed: bool = False
 
 
+class NotificationInputLanguage(StrEnum):
+    en = "en"
+    ru = "ru"
+
+
+class NotificationAction(BaseModel):
+    data: str = Field(
+        ...,
+        description="Opaque, signed by Muster like a button's data; return it unchanged with `notification_acknowledged`.",
+        pattern="^[!-~]{1,64}$",
+    )
+    label: str = Field(
+        ...,
+        description='How the person acknowledges, in their language, such as "Press 1 to acknowledge"; the bridge may say it in its own words.',
+        max_length=200,
+        min_length=1,
+    )
+
+
+class NotificationSent(BaseModel):
+    notification_id: str = Field(
+        ...,
+        description="Names the notification in its `notification_acknowledged`; opaque to Muster.",
+        max_length=512,
+        min_length=1,
+    )
+    replayed: bool
+
+
 class AnswerInput(BaseModel):
     event_id: str = Field(..., pattern="^[!-~]{1,200}$")
     text: str = Field(..., description="Plain text; a pop-up may shorten it.", max_length=500, min_length=1)
@@ -265,10 +299,14 @@ class AnswerShownShownAs(StrEnum):
     popup = "popup"
     thread = "thread"
     direct = "direct"
+    notification = "notification"
 
 
 class AnswerShown(BaseModel):
-    shown_as: AnswerShownShownAs = Field(..., description="Where the person sees the answer.")
+    shown_as: AnswerShownShownAs = Field(
+        ...,
+        description="Where the person sees the answer; `notification` is told in the call or in the reply to the message of a notification.",
+    )
     replayed: bool = False
 
 
@@ -313,11 +351,23 @@ class MessageDeletedEvent(EventBase):
     message_id: str
 
 
-class Event(RootModel[PressEvent | ThreadMessageEvent | AccountLinkEvent | MessageDeletedEvent]):
-    root: PressEvent | ThreadMessageEvent | AccountLinkEvent | MessageDeletedEvent = Field(
-        ...,
-        description="One event; `type` selects the variant. `account_link` events are always sent; the others only with the feature they belong to (`buttons`, `thread_messages`, `deletion_events`).",
-        discriminator="type",
+class NotificationAcknowledgedEvent(EventBase):
+    type: Literal["notification_acknowledged"]
+    notification_id: str = Field(
+        ..., description="The `notification_id` that `sendNotification` answered.", max_length=512, min_length=1
+    )
+    data: str = Field(..., description="The notification's `action.data`, unchanged.", pattern="^[!-~]{1,64}$")
+
+
+class Event(
+    RootModel[PressEvent | ThreadMessageEvent | AccountLinkEvent | MessageDeletedEvent | NotificationAcknowledgedEvent]
+):
+    root: PressEvent | ThreadMessageEvent | AccountLinkEvent | MessageDeletedEvent | NotificationAcknowledgedEvent = (
+        Field(
+            ...,
+            description="One event; `type` selects the variant. A bridge in the role `messenger` always sends `account_link` events and the others only with the feature they belong to (`buttons`, `thread_messages`, `deletion_events`); a bridge in the role `gateway` sends `notification_acknowledged`.",
+            discriminator="type",
+        )
     )
 
 
@@ -421,6 +471,20 @@ class LayoutAlerts(BaseModel):
     )
 
 
+class NotificationInput(BaseModel):
+    contact: str = Field(
+        ...,
+        description="Where the bridge reaches the person, as they entered it in Muster and the bridge understands it, such as a phone number.",
+        max_length=200,
+        min_length=1,
+    )
+    text: str = Field(
+        ..., description="Plain text, which the bridge reads out or sends as it can.", max_length=1000, min_length=1
+    )
+    language: NotificationInputLanguage = Field(..., description="The language of the person, which the text is in.")
+    action: NotificationAction | None = None
+
+
 class EventBatch(BaseModel):
     events: list[Event]
     next_cursor: str = Field(
@@ -469,6 +533,11 @@ class Info(BaseModel):
         description="An `http` or `https` link that opens a chat with the bot and hands it the Account link token, with `{token}` where the token goes, such as `https://chat.example.org/bots/muster?start={token}`. Muster shows the link next to the token in the profile; without one it shows only the token. Another scheme makes `info` fail the Connection check.",
         max_length=1024,
         pattern="^https?://\\S*\\{token\\}\\S*$",
+    )
+    roles: list[InfoRole] | None = Field(
+        default=None,
+        description="What the bridge is (see Roles); `messenger` when it is missing, so a bridge written before roles existed is a messenger.",
+        min_length=1,
     )
 
 

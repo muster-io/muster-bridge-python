@@ -274,8 +274,16 @@ def test_the_copy_is_the_3_1_document_under_mit() -> None:
     assert DOCUMENT["info"]["license"]["identifier"] == "MIT"
 
 
+GATEWAY_OPERATIONS = frozenset({"sendNotification"})
+"""The operations of the role gateway, which this messenger-only library does not serve."""
+
+
 def test_every_operation_of_the_specification_is_routed() -> None:
-    spec = sorted(f"{method} {path} {op_id}" for op_id, (method, path, _) in spec_operations().items())
+    spec = sorted(
+        f"{method} {path} {op_id}"
+        for op_id, (method, path, _) in spec_operations().items()
+        if op_id not in GATEWAY_OPERATIONS
+    )
     table = sorted(f"{op.method} {op.template} {op.op_id}" for op in OPERATIONS)
     assert spec == table
     assert set(DECLARED) == {op.op_id for op in OPERATIONS}
@@ -283,6 +291,8 @@ def test_every_operation_of_the_specification_is_routed() -> None:
 
 def test_declared_classes_match_the_specification() -> None:
     for op_id, (_, _, operation) in spec_operations().items():
+        if op_id in GATEWAY_OPERATIONS:
+            continue
         statuses = set(operation["responses"])
         unknown = {s for s in statuses if s not in STATUS_CLASS and s != "401" and not s.startswith("2")}
         assert not unknown, f"{op_id} declares {unknown}, which no class has"
@@ -314,6 +324,14 @@ async def test_requests_and_answers_match_the_specification(make_bridge: MakeBri
     response = await bridge.call(exchange.method, exchange.path, token=exchange.token, key=key, body=exchange.body)
     assert response.status_code == exchange.status, response.text
     check_exchange(exchange.op, response, valid_request=not exchange.invalid and exchange.token == TOKEN_MAIN)
+
+
+async def test_info_claims_no_gateway_role_and_notifications_are_not_served(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge()
+    info = (await bridge.call("GET", "/v1/info")).json()
+    assert "roles" not in info
+    response = await bridge.call("POST", "/v1/notifications", key="k1", body="{}")
+    assert response.status_code == 404
 
 
 async def test_info_with_every_member_matches_the_specification(make_bridge: MakeBridge) -> None:
