@@ -29,6 +29,7 @@ from conftest import (
     raising,
     two_bots,
     with_body,
+    with_mentions,
 )
 from openapi_core import Config, OpenAPI
 from openapi_core.datatypes import RequestParameters
@@ -161,6 +162,14 @@ class Exchange:
     """The request does not match the specification, so only the answer is validated."""
 
 
+MENTIONS = [
+    {"ref": "m1", "external_id": "u-alice", "display_name": "Alice Smith"},
+    {"ref": "m2", "kind": "user", "external_id": "u-bob", "display_name": "Bob"},
+    {"ref": "m3", "kind": "group", "external_id": "oncall", "display_name": "oncall"},
+    {"ref": "m4", "kind": "everyone", "external_id": "here", "display_name": "here"},
+]
+BAD_KIND = {"ref": "m5", "kind": "team", "external_id": "x", "display_name": "x"}
+
 EXCHANGES = [
     Exchange("getInfo", "200", "GET", "/v1/info", 200),
     Exchange("getInfo", "401", "GET", "/v1/info", 401, token="wrong"),
@@ -168,6 +177,8 @@ EXCHANGES = [
     Exchange("postMessage", "201 replayed", "POST", POST, 201, POST_BODY, setup=replay(POST, POST_BODY)),
     Exchange("postMessage", "201 layout", "POST", POST, 201, with_layout(POST_BODY)),
     Exchange("postMessage", "201 layout dropped", "POST", POST, 201, with_layout(POST_BODY, "{}"), invalid=True),
+    Exchange("postMessage", "201 mentions of every kind", "POST", POST, 201, with_mentions(POST_BODY, MENTIONS)),
+    Exchange("postMessage", "400 unknown kind", "POST", POST, 400, with_mentions(POST_BODY, [BAD_KIND]), invalid=True),
     Exchange("postMessage", "400 spec", "POST", POST, 400, "{}", invalid=True),
     Exchange("postMessage", "400 limit", "POST", POST, 400, with_body(POST_BODY, "x" * 501)),
     Exchange("postMessage", "401", "POST", POST, 401, POST_BODY, token="wrong"),

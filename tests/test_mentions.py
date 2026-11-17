@@ -5,10 +5,12 @@ import random
 import re
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from muster_bridge import Mention, replace_mentions
+from muster_bridge import Mention, MentionKind, replace_mentions
 
 MENTIONS = [
     Mention(ref="m1", external_id="u-alice", display_name="Alice Smith"),
@@ -129,3 +131,59 @@ def test_replace_mentions_takes_linear_time(body: str, want: str) -> None:
     assert replace_mentions(body, MENTIONS, native) == want
     # A quadratic scan takes minutes over 100 000 characters, a linear one milliseconds; 5 s leaves room for any CI.
     assert time.perf_counter() - started < 5
+
+
+GROUP = Mention(ref="g1", kind=MentionKind.MentionKindGroup, external_id="oncall", display_name="oncall")
+EVERYONE = Mention(ref="e1", kind=MentionKind.MentionKindEveryone, external_id="here", display_name="here")
+
+
+def test_a_mention_without_kind_is_a_user() -> None:
+    assert (
+        Mention.model_validate_json('{"ref":"m1","external_id":"u","display_name":"U"}').kind
+        == MentionKind.MentionKindUser
+    )
+    assert Mention(ref="m1", external_id="u", display_name="U").kind == MentionKind.MentionKindUser
+
+
+def test_render_gets_each_entry_with_its_kind() -> None:
+    seen: list[tuple[MentionKind, str, str]] = []
+
+    def render(mention: Mention) -> str:
+        seen.append((mention.kind, mention.external_id, mention.display_name))
+        return f"<{mention.kind.value}>"
+
+    body = "[@Alice Smith](muster-mention:m1) [@oncall](muster-mention:g1) [@here](muster-mention:e1)"
+    got = replace_mentions(body, [*MENTIONS, GROUP, EVERYONE], render)
+    assert got == "<user> <group> <everyone>"
+    assert seen == [
+        (MentionKind.MentionKindUser, "u-alice", "Alice Smith"),
+        (MentionKind.MentionKindGroup, "oncall", "oncall"),
+        (MentionKind.MentionKindEveryone, "here", "here"),
+    ]
+
+
+def test_an_undeclared_kind_is_shown_as_the_link_text_of_its_marker() -> None:
+    def render(mention: Mention) -> str | None:
+        return native(mention) if mention.kind == MentionKind.MentionKindUser else None
+
+    body = "[@Alice Smith](muster-mention:m1) [@oncall](muster-mention:g1) [@here](muster-mention:e1)"
+    assert replace_mentions(body, [*MENTIONS, GROUP, EVERYONE], render) == "<@u-alice> @oncall @here"
+
+
+def readme_example() -> dict[str, Any]:
+    """Run the README's example for group mentions and mentions of everyone in the chat and return its names."""
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Mentions of groups and of everyone in the chat", 1)[1].split("\n## ", 1)[0]
+    match = re.search(r"```python\n(.*?)```", section, re.DOTALL)
+    assert match, "README.md has no example under Mentions of groups and of everyone in the chat"
+    scope: dict[str, Any] = {}
+    exec(compile(match.group(1), "README.md", "exec"), scope)  # noqa: S102 - the repository's own example
+    return scope
+
+
+def test_the_readme_example_renders_a_user_a_group_and_here() -> None:
+    scope = readme_example()
+    assert scope["text"] == "<@u-alice> <!group:oncall> <!here> @all"
+    capabilities = scope["capabilities"]
+    assert capabilities.group_mentions is True
+    assert [name.value for name in capabilities.everyone_mentions] == ["here"]

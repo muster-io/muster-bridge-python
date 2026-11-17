@@ -30,6 +30,7 @@ from conftest import (
     raising,
     with_body,
     with_buttons,
+    with_mentions,
 )
 from starlette.applications import Starlette
 from starlette.routing import Mount
@@ -989,3 +990,30 @@ async def test_the_messenger_gets_the_layout_that_muster_sent_and_none_without_i
         assert (await bridge.call(method, path, key=key and "k2", body=with_layout(plain))).is_success
     got = [cast(MessageContent, call.payload).layout for call in bridge.messenger.calls]
     assert [layout and layout.model_dump(mode="json") for layout in got] == [None, LAYOUT, None, LAYOUT]
+
+
+KIND_MENTIONS = [
+    {"ref": "m1", "external_id": "u-alice", "display_name": "Alice Smith"},
+    {"ref": "m2", "kind": "group", "external_id": "oncall", "display_name": "oncall"},
+    {"ref": "m3", "kind": "everyone", "external_id": "channel", "display_name": "channel"},
+]
+
+
+async def test_the_messenger_gets_the_kind_of_each_mention(bridge: Harness) -> None:
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_mentions(POST_BODY, KIND_MENTIONS))
+    assert response.status_code == 201, response.text
+    mentions = getattr(bridge.messenger.calls[-1].payload, "mentions", [])
+    assert [(m.kind.value, m.external_id, m.display_name) for m in mentions] == [
+        ("user", "u-alice", "Alice Smith"),
+        ("group", "oncall", "oncall"),
+        ("everyone", "channel", "channel"),
+    ]
+
+
+async def test_a_bridge_without_group_or_everyone_mentions_never_refuses_their_entries(make_bridge: MakeBridge) -> None:
+    capabilities = all_capabilities().model_copy(update={"group_mentions": None, "everyone_mentions": ["here"]})
+    bridge = await make_bridge(capabilities=capabilities)
+    mentions = [*KIND_MENTIONS, {"ref": "m4", "kind": "everyone", "external_id": "all", "display_name": "all"}]
+    response = await bridge.call("POST", "/v1/messages", key="k1", body=with_mentions(POST_BODY, mentions))
+    assert response.status_code == 201, response.text
+    assert bridge.messenger.count("post_message") == 1

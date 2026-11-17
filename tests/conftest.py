@@ -29,6 +29,7 @@ from muster_bridge import (
     CapabilitiesButtons,
     CapabilitiesDelete,
     CapabilitiesDirectMessages,
+    CapabilitiesEveryoneMention,
     CapabilitiesPrivateAnswer,
     CapabilitiesThreadMessages,
     Config,
@@ -79,6 +80,11 @@ DM_BODY = '{"user_external_id":"u-alice","body":"Your code is 123456."}'
 def with_body(body: str, text: str) -> str:
     """Return a request body with its "body" replaced by text."""
     return body.replace('"body":"b"', '"body":' + json.dumps(text), 1)
+
+
+def with_mentions(body: str, mentions: list[dict[str, str]]) -> str:
+    """Return a request body with its mentions replaced by the entries."""
+    return body.replace('"mentions":[]', '"mentions":' + json.dumps(mentions), 1)
 
 
 def with_buttons(body: str, n: int, data: str) -> str:
@@ -308,6 +314,11 @@ def all_capabilities() -> Capabilities:
         direct_messages=CapabilitiesDirectMessages(bot_can_start=True),
         private_answers=[CapabilitiesPrivateAnswer.ephemeral],
         native_mentions=True,
+        group_mentions=True,
+        everyone_mentions=[
+            CapabilitiesEveryoneMention.EveryoneMentionChannel,
+            CapabilitiesEveryoneMention.EveryoneMentionHere,
+        ],
         quiet_messages=True,
         status_color=True,
         delete=CapabilitiesDelete(max_age_seconds=None),
