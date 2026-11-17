@@ -42,7 +42,9 @@ In this order; an earlier source wins over a later one.
 | `src/muster_bridge/models.py` | generated from `api/bridge.yaml` by `make generate`; never edited by hand |
 | `src/muster_bridge/py.typed` | marks the package as typed |
 | `tests/` | the tests; `conftest.py` holds the shared helpers (the fake clock, the fake messenger, the push callbacks), `test_spec.py` validates every request and answer against the specification with openapi-core |
+| `src/muster_bridge/gateway.py` | the role gateway: the protocol `Gateway` and `AcknowledgedNotification` |
 | `examples/memory_bridge.py` | the example: a bridge whose messenger lives in memory, which the README's quick start shows and `make conformance` runs from the built wheel |
+| `examples/gateway_bridge.py` | the example of the role gateway, which the README shows and `make conformance` runs from the built wheel with `--contact` |
 | `api/` | the specification's copy |
 | `.github/` | the workflows, Renovate and the pull request template |
 | `pyproject.toml`, `uv.lock`, `.python-version` | the distribution `muster-bridge`, its dependencies and the tools' settings; the lock of the development tools, never edited by hand; the Python of development and of CI's single-version jobs |

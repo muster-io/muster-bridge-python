@@ -130,6 +130,7 @@ DECLARED: dict[str, frozenset[str]] = {
     "findUsers": frozenset({"invalid", "rate_limited", "transient"}),
     "sendDirectMessage": frozenset({"invalid", "forbidden", "rate_limited", "transient"}),
     "answerEvent": frozenset({"invalid", "gone", "rate_limited", "transient"}),
+    "sendNotification": frozenset({"invalid", "forbidden", "rate_limited", "transient"}),
     "pollEvents": frozenset({"invalid", "rate_limited", "transient"}),
 }
 """The classes each operation declares in api/bridge.yaml, besides 401."""

@@ -13,11 +13,15 @@ from typing import Any, cast
 import httpx
 import pytest
 from conftest import (
+    ACTION_BODY,
     ALICE,
+    BOTH_ROLES,
     LINK_TOKEN,
+    NOTIFICATION_BODY,
     START,
     TOKEN_MAIN,
     TOKEN_OTHER,
+    Callbacks,
     FailingStore,
     FakeClock,
     FakeMessenger,
@@ -31,9 +35,11 @@ from conftest import (
     make_config,
     problem_of,
     raising,
+    two_bots,
 )
 
 from muster_bridge import (
+    AcknowledgedNotification,
     AnswerShownShownAs,
     BridgeApp,
     Forbidden,
@@ -42,6 +48,7 @@ from muster_bridge import (
     NotOfferedError,
     Person,
     ReportedEvent,
+    StoredEvent,
     UnknownBotError,
 )
 from muster_bridge.events import BotSignal, Wakeup, stop
@@ -558,3 +565,125 @@ async def test_answer_event_account_link_token_is_redacted(bridge: Harness, capl
     assert "cannot answer the link [redacted]" in log
     assert "class=forbidden" in log
     assert LINK_TOKEN not in log
+
+
+async def test_acknowledge_queues_notification_acknowledged_with_the_action_data(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(roles=BOTH_ROLES)
+    at = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    await bridge.app.acknowledge("main", "n1", update_id="a1", at=at, chat="call-7")
+    await bridge.app.acknowledge("main", "n1", update_id="a1")
+    polled = await bridge.poll("?wait=0")
+    (event,) = polled.events
+    assert event == {
+        "id": event_id_of("main", "notification_acknowledged", "a1"),
+        "type": "notification_acknowledged",
+        "occurred_at": "2026-10-18T09:00:00Z",
+        "notification_id": "n1",
+        "data": "signed-data-1",
+    }
+    assert (await bridge.poll("?wait=0", token=TOKEN_OTHER)).events == []
+
+
+async def test_acknowledge_is_pushed(make_bridge: MakeBridge, callbacks: Callbacks) -> None:
+    callback = callbacks.add()
+    bridge = await make_bridge(bots=two_bots(main=callback.target()), roles=BOTH_ROLES)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    await bridge.app.acknowledge("main", "n1")
+    pushed = json.loads((await callback.next()).body)
+    assert (pushed["type"], pushed["notification_id"], pushed["data"]) == (
+        "notification_acknowledged",
+        "n1",
+        "signed-data-1",
+    )
+
+
+async def test_acknowledge_of_an_unknown_notification_raises_a_value_error(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(roles=BOTH_ROLES)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=NOTIFICATION_BODY)
+    for notification_id in ("n1", "nobody"):
+        with pytest.raises(ValueError, match="no notification"):
+            await bridge.app.acknowledge("main", notification_id)
+    assert (await bridge.poll("?wait=0")).events == []
+
+
+async def test_acknowledge_with_a_time_zone_less_time_is_invalid(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    with pytest.raises(InvalidEventError):
+        await bridge.app.acknowledge("main", "n1", at=datetime(2026, 10, 18, 9, 0))
+
+
+async def test_answer_event_reaches_the_gateway(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    at = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+    await bridge.app.acknowledge("main", "n1", update_id="a1", at=at, chat="call-7")
+    event_id = event_id_of("main", "notification_acknowledged", "a1")
+    response = await bridge.call("POST", "/v1/answers", key="k2", body=answer_body(event_id))
+    assert response.status_code == 200
+    assert response.text == '{"shown_as":"notification","replayed":false}'
+    first, second = bridge.gateway.calls
+    assert first.method == "send_notification"
+    assert (second.method, second.bot, second.text, second.key) == ("answer", "main", "Done", "k2")
+    assert second.event == AcknowledgedNotification(
+        id=event_id, notification_id="n1", data="signed-data-1", chat="call-7", occurred_at=at
+    )
+    replayed = await bridge.call("POST", "/v1/answers", key="k2", body=answer_body(event_id))
+    assert replayed.json() == {"shown_as": "notification", "replayed": True}
+    assert bridge.gateway.count("answer") == 1
+
+
+async def test_answer_event_of_both_roles_goes_to_the_role_of_the_event(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(roles=BOTH_ROLES)
+    press_id = await bridge.report_press("u1")
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    await bridge.app.acknowledge("main", "n1", update_id="a1")
+    assert (await bridge.call("POST", "/v1/answers", key="k2", body=answer_body(press_id))).status_code == 200
+    ack = event_id_of("main", "notification_acknowledged", "a1")
+    assert (await bridge.call("POST", "/v1/answers", key="k3", body=answer_body(ack))).status_code == 200
+    assert (bridge.messenger.count("answer_event"), bridge.gateway.count("answer")) == (1, 1)
+
+
+async def test_answer_event_of_a_gateway_in_error(make_bridge: MakeBridge, caplog: pytest.LogCaptureFixture) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    await bridge.call("POST", "/v1/notifications", key="k1", body=ACTION_BODY)
+    await bridge.app.acknowledge("main", "n1", update_id="a1")
+    event_id = event_id_of("main", "notification_acknowledged", "a1")
+    bridge.gateway.answering = raising(Gone("The call has ended."))
+    response = await bridge.call("POST", "/v1/answers", key="k2", body=answer_body(event_id))
+    assert problem_of(response, 404, "gone")["detail"] == "The call has ended."
+    bridge.gateway.answering = raising(RuntimeError("the line dropped"))
+    problem_of(await bridge.call("POST", "/v1/answers", key="k3", body=answer_body(event_id)), 500, "transient")
+    assert "the line dropped" in logged(caplog)
+
+
+async def test_a_gateway_without_the_role_messenger_reports_no_messenger_event(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    with pytest.raises(NotOfferedError):
+        await bridge.app.direct_message("main", user=ALICE, text=LINK_TOKEN)
+    with pytest.raises(NotOfferedError):
+        await bridge.app.press("main", message_id="m1", user=ALICE, data="d")
+    assert (await bridge.poll("?wait=0")).events == []
+
+
+async def test_a_messenger_event_in_the_store_of_a_gateway_is_gone(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    event = {"id": "e1", "type": "message_deleted", "occurred_at": "2026-10-18T09:00:00Z", "message_id": "m1"}
+    press = {**event, "type": "press", "user": json.loads(ALICE_JSON), "data": "d"}
+    stored = StoredEvent(id="e1", type="press", body=json.dumps(press).encode(), chat=None, until=START + timedelta(1))
+    await bridge.store.append_event("main", stored, START)
+    response = await bridge.call("POST", "/v1/answers", key="k1", body=answer_body("e1"))
+    assert problem_of(response, 404, "gone")["detail"] == GONE
+
+
+async def test_a_stored_acknowledgement_of_a_bridge_without_the_gateway_is_gone(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge()
+    ack = {"id": "e1", "type": "notification_acknowledged", "occurred_at": "2026-10-18T09:00:00Z"}
+    ack |= {"notification_id": "n1", "data": "d"}
+    stored = StoredEvent(
+        id="e1", type="notification_acknowledged", body=json.dumps(ack).encode(), chat=None, until=START + timedelta(1)
+    )
+    await bridge.store.append_event("main", stored, START)
+    response = await bridge.call("POST", "/v1/answers", key="k1", body=answer_body("e1"))
+    assert problem_of(response, 404, "gone")["detail"] == GONE

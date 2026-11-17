@@ -7,7 +7,15 @@ from datetime import datetime, timedelta
 import pytest
 from conftest import START
 
-from muster_bridge import KeyClaim, KeyState, MemoryStore, StoredAnswer, StoredEvent, UnknownCursorError
+from muster_bridge import (
+    KeyClaim,
+    KeyState,
+    MemoryStore,
+    NotificationStore,
+    StoredAnswer,
+    StoredEvent,
+    UnknownCursorError,
+)
 from muster_bridge.store import _Queue
 
 pytestmark = pytest.mark.anyio
@@ -223,3 +231,34 @@ def test_queue_find_of_a_number_not_queued() -> None:
     queue.events.append((2, stored_event("e2", NOW)))
     assert queue.find(1) is None
     assert queue.find(3) is None
+
+
+async def test_notifications_are_kept_until_their_time_ends() -> None:
+    store = MemoryStore()
+    assert isinstance(store, NotificationStore)
+    await store.save_notification("main", "n1", "data-1", NOW + RETENTION)
+    await store.save_notification("main", "n2", "data-2", NOW + timedelta(hours=1))
+    await store.save_notification("other", "n1", "data-other", NOW + RETENTION)
+    assert await store.find_notification("main", "n1", NOW) == "data-1"
+    assert await store.find_notification("other", "n1", NOW) == "data-other"
+    assert await store.find_notification("main", "nobody", NOW) is None
+    assert await store.find_notification("main", "n2", NOW + timedelta(minutes=59)) == "data-2"
+    assert await store.find_notification("main", "n2", NOW + timedelta(hours=1)) is None
+    assert await store.find_notification("main", "n1", NOW + RETENTION - timedelta(seconds=1)) == "data-1"
+    assert await store.find_notification("main", "n1", NOW + RETENTION) is None
+    assert store._notifications == {}
+
+
+async def test_a_notification_saved_again_is_kept_by_its_last_time() -> None:
+    store = MemoryStore()
+    await store.save_notification("main", "n1", "old", NOW + timedelta(hours=1))
+    await store.save_notification("main", "n1", "new", NOW + RETENTION)
+    assert await store.find_notification("main", "n1", NOW + timedelta(hours=2)) == "new"
+
+
+async def test_claims_forget_notifications_whose_time_ended() -> None:
+    store = MemoryStore()
+    await store.save_notification("main", "n1", "data-1", NOW + timedelta(hours=1))
+    await claim(store, "main", "k1", NOW + timedelta(hours=2), KeyState.CLAIMED)
+    assert store._notifications == {}
+    assert store._notification_expiry == []
