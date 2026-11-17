@@ -25,6 +25,9 @@ RUN1_SKIP := press push $(GATEWAY_SKIP)
 RUN2_SKIP := buttons user_lookup direct_message delete press push $(GATEWAY_SKIP)
 RUN1_PASS := $(filter-out $(RUN1_SKIP),$(STEPS))
 RUN2_PASS := $(filter-out $(RUN2_SKIP),$(STEPS))
+GATEWAY_FLAGS := --token-file /token --contact +10000000001
+GATEWAY_PASS := info poll answer notification notification_acknowledged
+GATEWAY_STEPS_SKIP := $(filter-out $(GATEWAY_PASS),$(STEPS))
 
 # The options of datamodel-code-generator: pydantic v2 models for Python 3.11, with the constraints of the
 # specification as Field arguments, names from the schemas' paths, the parameters of the operations as models of their
@@ -114,7 +117,7 @@ build: ## Build the sdist and the wheel into dist/
 
 ci: lint generate-check spec-check licenses test build ## The checks of a pull request, locally (conformance runs in its own CI job)
 
-conformance: ## Run muster bridge check from MUSTER_IMAGE against examples/memory_bridge.py three times (Linux, Docker)
+conformance: ## Run muster bridge check from MUSTER_IMAGE against examples/memory_bridge.py three times and examples/gateway_bridge.py once (Linux, Docker)
 	@sh -c "$$CONFORMANCE_SH"
 
 clean: ## Remove bin/, dist/, .venv/, the caches and the coverage data
@@ -171,6 +174,7 @@ $(PYTHON3) -m venv "$$dir/venv" || exit 1
 "$$dir/venv/bin/python" -I -c 'import muster_bridge, uvicorn; print("muster_bridge", muster_bridge.__version__, "from", muster_bridge.__file__, "uvicorn", uvicorn.__version__)' || exit 1
 python=$$dir/venv/bin/python
 example=$(abspath examples/memory_bridge.py)
+gateway_example=$(abspath examples/gateway_bridge.py)
 $(DOCKER) pull --quiet $(MUSTER_IMAGE) || exit 1
 echo "muster image: $$($(DOCKER) image inspect --format '{{index .RepoDigests 0}}' $(MUSTER_IMAGE))"
 $(DOCKER) run --rm $(MUSTER_IMAGE) version || exit 1
@@ -268,6 +272,38 @@ interactive() {
 	verify "$$1" "$$status" "$(filter-out $(GATEWAY_SKIP),$(STEPS))" "$(GATEWAY_SKIP)"
 }
 
+# gateway_interactive <name>: run the check against the gateway example with --contact and a person: the person
+# acknowledges the notification that the WAIT notification_acknowledged line names through POST /demo/acknowledge.
+gateway_interactive() {
+	$(DOCKER) run --rm --network host -v "$$dir/token:/token:ro" $(MUSTER_IMAGE) bridge check \
+		http://$(EXAMPLE_LISTEN) $(GATEWAY_FLAGS) > "$$dir/$$1.out" 2> "$$dir/$$1.err" &
+	check=$$!
+	id=
+	n=0
+	while [ "$$n" -lt 1200 ]; do
+		id=$$(sed -n 's/^WAIT notification_acknowledged: .*, notification_id \(.*\)$$/\1/p' "$$dir/$$1.out")
+		if [ -n "$$id" ] || ! kill -0 "$$check" 2>/dev/null; then break; fi
+		n=$$((n + 1))
+		sleep 0.1
+	done
+	if [ -n "$$id" ]; then
+		code=$$($(CURL) -sS -X POST -H 'Content-Type: application/json' \
+			-d "$$(printf '{"notification_id":"%s"}' "$$id")" \
+			-o "$$dir/$$1.ack" -w '%{http_code}' http://$(EXAMPLE_LISTEN)/demo/acknowledge)
+		case $$code in
+		2??) ;;
+		*) echo "conformance $$1: the acknowledgement answered $$code: $$(cat "$$dir/$$1.ack" 2>/dev/null)" ;;
+		esac
+	else
+		echo "conformance $$1: no WAIT notification_acknowledged line"
+	fi
+	wait "$$check"
+	status=$$?
+	check=
+	cat "$$dir/$$1.out"
+	verify "$$1" "$$status" "$(GATEWAY_PASS)" "$(GATEWAY_STEPS_SKIP)"
+}
+
 echo "== memory 1: every feature, --no-interactive"
 if start memory-all "$$python" -I "$$example"; then
 	unattended memory-all "$(RUN1_PASS)" "$(RUN1_SKIP)"
@@ -288,6 +324,14 @@ echo "== memory 3: every feature, interactive, the example pushing to the check'
 if start memory-interactive "$$python" -I "$$example" --push-url http://$(PUSH_LISTEN)/ \
 	--push-secret-file "$$dir/push-secret"; then
 	interactive memory-interactive
+else
+	failed=1
+fi
+stop
+
+echo "== gateway: the gateway example, interactive with --contact"
+if start gateway "$$python" -I "$$gateway_example"; then
+	gateway_interactive gateway
 else
 	failed=1
 fi

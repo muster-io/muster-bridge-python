@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ValidationError
 
 from muster_bridge.config import to_json_object
+from muster_bridge.gateway import AcknowledgedNotification
 from muster_bridge.messenger import ReportedEvent
 from muster_bridge.models import (
     AccountLinkEvent,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from muster_bridge.messenger import EventType
     from muster_bridge.store import Store
 
-__all__ = ["InvalidEventError", "NotOfferedError", "UnknownBotError"]
+__all__ = ["InvalidEventError", "NotOfferedError", "UnknownBotError", "UnknownNotificationError"]
 
 EVENT_RETENTION = timedelta(hours=24)
 POLL_BATCH = 100
@@ -47,6 +48,10 @@ _ACCOUNT_LINK_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 
 class UnknownBotError(LookupError):
     """A report, or set_push, for a bot that is not in Config.bots."""
+
+
+class UnknownNotificationError(ValueError):
+    """acknowledge for a notification the library did not issue, no longer keeps, or that carried no action."""
 
 
 class NotOfferedError(Exception):
@@ -268,11 +273,10 @@ class Events:
         finally:
             await stop(sleeper, changed)
 
-    async def find(self, bot: str, wanted: str) -> tuple[ReportedEvent, str | None] | None:
+    async def find(self, bot: str, wanted: str) -> tuple[ReportedEvent | AcknowledgedNotification, str | None] | None:
         """Return the kept event that answerEvent names, with its Account link token, or None.
 
-        None also for a deleted message, which no person caused, and for a gateway's notification_acknowledged, which
-        this messenger-only library never reports. Raise StoredEventError for a stored body that is not
+        None also for a deleted message, which no person caused. Raise StoredEventError for a stored body that is not
         an event's.
         """
         stored = await self._store.find_event(bot, wanted, self._clock.now())
@@ -282,8 +286,17 @@ class Events:
             event = Event.model_validate_json(stored.body, strict=True).root
         except ValidationError:
             raise StoredEventError("a stored event is not the JSON of an event") from None
-        if isinstance(event, MessageDeletedEvent | NotificationAcknowledgedEvent):
+        if isinstance(event, MessageDeletedEvent):
             return None
+        if isinstance(event, NotificationAcknowledgedEvent):
+            acknowledged = AcknowledgedNotification(
+                id=event.id,
+                notification_id=event.notification_id,
+                data=event.data,
+                chat=stored.chat,
+                occurred_at=event.occurred_at.astimezone(UTC),
+            )
+            return acknowledged, None
         reported = ReportedEvent(
             id=event.id,
             type=event.type,

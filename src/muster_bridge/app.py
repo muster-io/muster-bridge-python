@@ -32,14 +32,17 @@ from muster_bridge.events import (
     NotOfferedError,
     StoredEventError,
     UnknownBotError,
+    UnknownNotificationError,
     WaitError,
     account_link_token,
     stop,
 )
+from muster_bridge.gateway import AcknowledgedNotification
 from muster_bridge.messenger import bind_idempotency_key, unbind_idempotency_key
 from muster_bridge.models import (
     AnswerInput,
     AnswerShown,
+    AnswerShownShownAs,
     ChannelCheck,
     CheckChannelParameters,
     DeleteMessageParameters,
@@ -48,10 +51,13 @@ from muster_bridge.models import (
     EditMessageParameters,
     EventBatch,
     FindUsersParameters,
+    InfoRole,
     MessageContent,
     MessageEdited,
     MessageInput,
     MessagePosted,
+    NotificationInput,
+    NotificationSent,
     Person,
     PersonList,
     PollEventsParameters,
@@ -91,8 +97,10 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from muster_bridge.config import Clock, Config, PushTarget
+    from muster_bridge.gateway import Gateway
     from muster_bridge.messenger import Deleter, DirectMessenger, EventType, Messenger, UserFinder
     from muster_bridge.models import Button, CapabilitiesButtons
+    from muster_bridge.store import NotificationStore
 
 __all__ = ["BridgeApp", "ClosedError"]
 
@@ -104,6 +112,7 @@ The layout repeats the body's content, and Muster's JSON escaping writes up to 6
 and so about 1.2 MB per request with the body and the layout, which already exceeds 1 MiB; 4 MiB leaves a wide margin.
 """
 MAX_CHANNEL_NAME = 200
+MAX_NOTIFICATION_ID = 512
 KEY_CLAIM_TTL = timedelta(minutes=2)
 KEY_RETENTION = timedelta(hours=24)
 
@@ -157,9 +166,13 @@ OPERATIONS = (
         "sendDirectMessage", "POST", "/v1/direct-messages", HTTPStatus.CREATED, DirectMessageSent, idempotent=True
     ),
     Operation("answerEvent", "POST", "/v1/answers", HTTPStatus.OK, AnswerShown, idempotent=True),
+    Operation("sendNotification", "POST", "/v1/notifications", HTTPStatus.CREATED, NotificationSent, idempotent=True),
     Operation("pollEvents", "GET", "/v1/events", HTTPStatus.OK, EventBatch),
 )
 """The operations of api/bridge.yaml that the library serves."""
+
+_ROLE_FREE = frozenset({"getInfo", "answerEvent", "pollEvents", "sendNotification"})
+"""The operations a bridge serves whatever its roles are; the others are the messenger's."""
 
 
 class ClosedError(RuntimeError):
@@ -317,24 +330,30 @@ class BridgeApp:
 
     It serves every operation of api/bridge.yaml under /v1/ for the bots of its Config and calls the messenger: serve
     it with an ASGI server such as uvicorn, or mount it under a path of a Starlette or FastAPI application. The bridge
-    reports what happens in the messenger with press, thread_message, message_deleted and direct_message; the events
-    wait for pollEvents and are pushed to the bots' push targets. It raises ConfigError for a configuration it refuses,
-    naming every problem. It runs on the event loop that serves it, and on the next one when that loop ends, as with
-    Starlette's TestClient without `with`: the loops take turns, never run at once in two threads. The
-    leading-underscore parameters are for tests.
+    reports what happens in the messenger with press, thread_message, message_deleted and direct_message, and what
+    happens to a notification with acknowledge; the events wait for pollEvents and are pushed to the bots' push
+    targets. A bridge in the role gateway calls Config.gateway, and takes no Messenger when it is only a gateway. It
+    raises ConfigError for a configuration it refuses, naming every problem. It runs on the event loop that serves it,
+    and on the next one when that loop ends, as with Starlette's TestClient without `with`: the loops take turns, never
+    run at once in two threads. The leading-underscore parameters are for tests.
     """
 
     def __init__(
         self,
         config: Config,
-        messenger: Messenger,
+        messenger: Messenger | None = None,
         *,
         _clock: Clock | None = None,
         _random: Callable[[int], bytes] | None = None,
         _transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         prepared = prepare(config, messenger)
-        self._messenger = messenger
+        # None only for a bridge without the role messenger, which never routes an operation that calls it.
+        self._messenger = cast("Messenger", messenger)
+        self._has_messenger = messenger is not None
+        self._gateway: Gateway | None = config.gateway
+        self._roles = prepared.roles
+        self._notifications: NotificationStore = cast("NotificationStore", prepared.store)
         self._info = prepared.info
         self._info_body = prepared.info_body
         self._store = prepared.store
@@ -359,6 +378,7 @@ class BridgeApp:
             "findUsers": self._find_users,
             "sendDirectMessage": self._send_direct_message,
             "answerEvent": self._answer_event,
+            "sendNotification": self._send_notification,
         }
         self._served = tuple(op for op in OPERATIONS if self._offers(op))
         self._bots = frozenset(bot.name for bot in prepared.bots)
@@ -473,9 +493,42 @@ class BridgeApp:
         answer_event answers there. Every bridge takes Account link tokens; the rest is as for press.
         """
         self._check_bot(bot)
+        if InfoRole.messenger not in self._roles:
+            raise NotOfferedError("direct_message needs the role messenger")
         token = account_link_token(text)
         if token is not None:
             await self._report(bot, "account_link", {"token": token, "user": user}, update_id, at, chat)
+
+    async def acknowledge(
+        self,
+        bot: str,
+        notification_id: str,
+        *,
+        update_id: str | None = None,
+        at: datetime | None = None,
+        chat: str | None = None,
+    ) -> None:
+        """Report that the person acknowledged a notification of the bot, as its action told them.
+
+        notification_id is the one Gateway.send_notification answered. The event carries the action.data of that
+        notification, which the library kept for 24 hours, and the rest is as for press: it returns once the event is
+        queued, update_id queues an update reported twice once, at is when it happened and chat, such as a call id,
+        comes back in AcknowledgedNotification.chat when Muster's answer reaches Gateway.answer. If the store failed
+        to keep the action when the notification was sent, which the library logs without failing the call (a retry
+        would call the person twice), the notification is unknown here.
+
+        Raises UnknownBotError, NotOfferedError without the role gateway, UnknownNotificationError (a ValueError)
+        for a notification this library did not issue, no longer keeps or that carried no action, InvalidEventError
+        for an event that would not match api/bridge.yaml, and what the store raises.
+        """
+        self._check_bot(bot)
+        if InfoRole.gateway not in self._roles:
+            raise NotOfferedError("acknowledge needs the role gateway")
+        data = await self._notifications.find_notification(bot, notification_id, self._clock.now())
+        if data is None:
+            raise UnknownNotificationError("no notification with this id and an action is kept for the bot")
+        members = {"notification_id": notification_id, "data": data}
+        await self._report(bot, "notification_acknowledged", members, update_id, at, chat)
 
     def set_push(self, bot: str, target: PushTarget | None) -> None:
         """Push the events of the bot to target from now on; None stops pushing.
@@ -540,6 +593,8 @@ class BridgeApp:
 
     def _offers(self, op: Operation) -> bool:
         capabilities = self._info.capabilities
+        if op.op_id not in _ROLE_FREE and InfoRole.messenger not in self._roles:
+            return False
         if op.op_id == "deleteMessage":
             return capabilities.delete is not None
         if op.op_id == "findUsers":
@@ -564,6 +619,8 @@ class BridgeApp:
                 "invalid", "This bridge does not serve this operation.", status=HTTPStatus.NOT_FOUND
             )
         op, value = routed
+        if op.op_id == "sendNotification" and InfoRole.gateway not in self._roles:
+            return problem_response("invalid", "This bridge does not have the role gateway.")
         if op.op_id == "getInfo":
             return _json_response(HTTPStatus.OK, self._info_body)
         if op.op_id == "pollEvents":
@@ -873,6 +930,32 @@ class BridgeApp:
         message = await call.body(DirectMessageInput)
         return await cast("DirectMessenger", self._messenger).send_direct_message(call.bot, message)
 
+    async def _send_notification(self, call: _Call) -> object:
+        notification = await call.body(NotificationInput)
+        call.extras += [notification.contact, notification.text]
+        sent: object = await cast("Gateway", self._gateway).send_notification(call.bot, notification)
+        action = notification.action
+        if (
+            action is not None
+            and isinstance(sent, NotificationSent)
+            and 1 <= len(sent.notification_id) <= MAX_NOTIFICATION_ID
+        ):
+            await self._keep_notification(call, sent.notification_id, action.data)
+        return sent
+
+    async def _keep_notification(self, call: _Call, notification_id: str, data: str) -> None:
+        """Keep the action data of a sent notification for acknowledge; a failure is logged, as the call was made."""
+        until = self._clock.now() + KEY_RETENTION
+        try:
+            await self._notifications.save_notification(call.bot, notification_id, data, until)
+        except Exception as error:
+            self._log.error(
+                "cannot keep the action of a notification: operation=%s bot=%s error=%s",
+                call.op.op_id,
+                call.bot,
+                self._redact(describe(error), *call.extras),
+            )
+
     async def _answer_event(self, call: _Call) -> object:
         """Give the messenger the event the answer is for.
 
@@ -890,6 +973,13 @@ class BridgeApp:
         event, token = found
         if token is not None:
             call.extras.append(token)
+        if isinstance(event, AcknowledgedNotification):
+            if self._gateway is None:
+                raise _Refusal("gone", "The bridge does not know this event, or no longer keeps it.")
+            await self._gateway.answer(call.bot, event, answer.text)
+            return AnswerShown(shown_as=AnswerShownShownAs.notification, replayed=False)
+        if not self._has_messenger:
+            raise _Refusal("gone", "The bridge does not know this event, or no longer keeps it.")
         shown: object = await self._messenger.answer_event(call.bot, event, answer.text)
         try:
             return AnswerShown.model_validate({"shown_as": shown, "replayed": False})

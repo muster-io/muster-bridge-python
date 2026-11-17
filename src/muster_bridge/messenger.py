@@ -35,7 +35,7 @@ __all__ = [
     "idempotency_key",
 ]
 
-EventType = Literal["press", "thread_message", "account_link", "message_deleted"]
+EventType = Literal["press", "thread_message", "account_link", "message_deleted", "notification_acknowledged"]
 """The type of an event the bridge reports."""
 
 

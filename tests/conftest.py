@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from muster_bridge import (
+    AcknowledgedNotification,
     AnswerShownShownAs,
     Bot,
     BridgeApp,
@@ -42,6 +43,8 @@ from muster_bridge import (
     MessageEdited,
     MessageInput,
     MessagePosted,
+    NotificationInput,
+    NotificationSent,
     Person,
     PushTarget,
     ReportedEvent,
@@ -304,6 +307,50 @@ class MinimalMessenger:
         return AnswerShownShownAs.thread
 
 
+@dataclass
+class GatewayCall:
+    """A call of the fake gateway."""
+
+    method: str
+    bot: str
+    notification: NotificationInput | None = None
+    event: AcknowledgedNotification | None = None
+    text: str | None = None
+    key: str | None = field(default_factory=idempotency_key)
+
+
+class FakeGateway:
+    """Implements Gateway; each call is recorded, and answered by its override or with notifications n1, n2, …"""
+
+    def __init__(self) -> None:
+        self.calls: list[GatewayCall] = []
+        self.send: Callable[[str, NotificationInput], Awaitable[NotificationSent]] | None = None
+        self.answering: Callable[[str, AcknowledgedNotification, str], Awaitable[None]] | None = None
+
+    def count(self, method: str) -> int:
+        return sum(1 for call in self.calls if call.method == method)
+
+    async def send_notification(self, bot: str, notification: NotificationInput) -> NotificationSent:
+        self.calls.append(GatewayCall("send_notification", bot, notification=notification))
+        if self.send is not None:
+            return await self.send(bot, notification)
+        return NotificationSent(notification_id=f"n{self.count('send_notification')}", replayed=False)
+
+    async def answer(self, bot: str, event: AcknowledgedNotification, text: str) -> None:
+        self.calls.append(GatewayCall("answer", bot, event=event, text=text))
+        if self.answering is not None:
+            await self.answering(bot, event, text)
+
+
+NOTIFICATION_BODY = '{"contact":"+10000000001","text":"HighErrorRate firing","language":"en"}'
+ACTION_BODY = (
+    '{"contact":"+10000000001","text":"HighErrorRate firing","language":"ru",'
+    '"action":{"data":"signed-data-1","label":"Press 1 to acknowledge"}}'
+)
+ACK_UPDATE = "a1"
+BOTH_ROLES = ("messenger", "gateway")
+
+
 def all_capabilities() -> Capabilities:
     """Return the capabilities of every feature."""
     return Capabilities(
@@ -513,6 +560,7 @@ class Harness:
     store: Store
     client: httpx.AsyncClient
     callbacks: Callbacks
+    gateway: FakeGateway
 
     async def call(
         self,
@@ -558,6 +606,7 @@ class MakeBridge(Protocol):
         messenger: FakeMessenger | None = None,
         store: Store | None = None,
         random: Callable[[int], bytes] | None = None,
+        gateway_only: bool = False,
         **changes: Any,
     ) -> Harness: ...
 
@@ -572,14 +621,23 @@ async def make_bridge(clock: FakeClock, callbacks: Callbacks) -> AsyncIterator[M
         messenger: FakeMessenger | None = None,
         store: Store | None = None,
         random: Callable[[int], bytes] | None = None,
+        gateway_only: bool = False,
         **changes: Any,
     ) -> Harness:
+        """Make a bridge; gateway_only makes one without a messenger, without capabilities and with only that role."""
         messenger = messenger or FakeMessenger()
         store = store or MemoryStore()
+        if gateway_only:
+            changes = {"roles": ("gateway",), "capabilities": Capabilities(), "user_lookup": "none", **changes}
+        if "gateway" in changes.get("roles", ()):
+            changes.setdefault("gateway", FakeGateway())
         config = make_config(store=store, **changes)
-        app = BridgeApp(config, messenger, _clock=clock, _random=random, _transport=callbacks.transport)
+        gateway = config.gateway if isinstance(config.gateway, FakeGateway) else FakeGateway()
+        app = BridgeApp(
+            config, None if gateway_only else messenger, _clock=clock, _random=random, _transport=callbacks.transport
+        )
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bridge")
-        made.append(Harness(app, messenger, clock, store, client, callbacks))
+        made.append(Harness(app, messenger, clock, store, client, callbacks, gateway))
         return made[-1]
 
     yield make
@@ -657,6 +715,14 @@ class FailingStore:
     async def find_event(self, bot: str, event_id: str, now: datetime) -> StoredEvent | None:
         await self._check("find_event")
         return await self.inner.find_event(bot, event_id, now)
+
+    async def save_notification(self, bot: str, notification_id: str, data: str, until: datetime) -> None:
+        await self._check("save_notification")
+        await self.inner.save_notification(bot, notification_id, data, until)
+
+    async def find_notification(self, bot: str, notification_id: str, now: datetime) -> str | None:
+        await self._check("find_notification")
+        return await self.inner.find_notification(bot, notification_id, now)
 
 
 def logged(caplog: pytest.LogCaptureFixture) -> str:

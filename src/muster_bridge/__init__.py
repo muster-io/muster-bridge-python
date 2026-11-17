@@ -10,7 +10,8 @@ for a quick start.
 
 from muster_bridge.app import BridgeApp, ClosedError
 from muster_bridge.config import Bot, Config, ConfigError, PushTarget
-from muster_bridge.events import InvalidEventError, NotOfferedError, UnknownBotError
+from muster_bridge.events import InvalidEventError, NotOfferedError, UnknownBotError, UnknownNotificationError
+from muster_bridge.gateway import AcknowledgedNotification, Gateway
 from muster_bridge.mentions import replace_mentions
 from muster_bridge.messenger import (
     Deleter,
@@ -35,6 +36,7 @@ from muster_bridge.models import (
     DirectMessageInput,
     DirectMessageSent,
     InfoEventDelivery,
+    InfoRole,
     InfoUserLookup,
     Layout,
     LayoutAlerts,
@@ -55,17 +57,31 @@ from muster_bridge.models import (
     MessageInput,
     MessageKind,
     MessagePosted,
+    NotificationAction,
+    NotificationInput,
+    NotificationInputLanguage,
+    NotificationSent,
     Person,
     Status,
     ThreadReplyInput,
     ThreadReplyPosted,
 )
 from muster_bridge.problems import BridgeError, Forbidden, Gone, Invalid, RateLimited, Transient
-from muster_bridge.store import KeyClaim, KeyState, MemoryStore, Store, StoredAnswer, StoredEvent, UnknownCursorError
+from muster_bridge.store import (
+    KeyClaim,
+    KeyState,
+    MemoryStore,
+    NotificationStore,
+    Store,
+    StoredAnswer,
+    StoredEvent,
+    UnknownCursorError,
+)
 
 __version__ = "0.1.1"
 
 __all__ = [
+    "AcknowledgedNotification",
     "AnswerShownShownAs",
     "Bot",
     "BridgeApp",
@@ -88,8 +104,10 @@ __all__ = [
     "DirectMessenger",
     "EventType",
     "Forbidden",
+    "Gateway",
     "Gone",
     "InfoEventDelivery",
+    "InfoRole",
     "InfoUserLookup",
     "Invalid",
     "InvalidEventError",
@@ -117,6 +135,11 @@ __all__ = [
     "MessagePosted",
     "Messenger",
     "NotOfferedError",
+    "NotificationAction",
+    "NotificationInput",
+    "NotificationInputLanguage",
+    "NotificationSent",
+    "NotificationStore",
     "Person",
     "PushTarget",
     "RateLimited",
@@ -130,6 +153,7 @@ __all__ = [
     "Transient",
     "UnknownBotError",
     "UnknownCursorError",
+    "UnknownNotificationError",
     "UserFinder",
     "idempotency_key",
     "replace_mentions",

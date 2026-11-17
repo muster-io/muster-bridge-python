@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from conftest import TEST_SECRET, TOKEN_MAIN, FakeMessenger, MinimalMessenger, make_config
+from conftest import TEST_SECRET, TOKEN_MAIN, FakeGateway, FakeMessenger, MinimalMessenger, make_config
 
 import muster_bridge
 from muster_bridge import (
@@ -24,6 +24,7 @@ from muster_bridge import (
     CapabilitiesPrivateAnswer,
     Config,
     ConfigError,
+    InfoRole,
     Limits,
     MemoryStore,
     Messenger,
@@ -41,10 +42,13 @@ async def get_info(app: BridgeApp, token: str = TOKEN_MAIN) -> httpx.Response:
         return await client.get("/v1/info", headers={"Authorization": f"Bearer {token}"})
 
 
-def refusal(config: Config, messenger: object | None = None) -> str:
-    """Return the ConfigError of the configuration, with a FakeMessenger unless another messenger is given."""
+DEFAULT: Any = object()
+
+
+def refusal(config: Config, messenger: object = DEFAULT) -> str:
+    """Return the ConfigError of the configuration, with a FakeMessenger unless another messenger, or None, is given."""
     with pytest.raises(ConfigError) as caught:
-        BridgeApp(config, cast("Messenger", FakeMessenger() if messenger is None else messenger))
+        BridgeApp(config, cast("Messenger", FakeMessenger() if messenger is DEFAULT else messenger))
     assert str(caught.value) == "\n".join(caught.value.problems)
     return str(caught.value)
 
@@ -194,7 +198,7 @@ def test_refuses_methods_that_are_not_coroutines() -> None:
     assert 'user_lookup "login" needs a messenger that implements UserFinder (find_user)' in error
     assert "the messenger lacks reply_in_thread" not in error
     with pytest.raises(ConfigError, match="the messenger is None"):
-        BridgeApp(make_config(), cast("Messenger", None))
+        BridgeApp(make_config(), None)
 
 
 def limits(**values: Any) -> Limits:
@@ -448,3 +452,88 @@ async def test_group_and_everyone_mentions_are_declared_in_info() -> None:
 async def test_info_declares_no_group_or_everyone_mentions_by_default() -> None:
     info = (await get_info(BridgeApp(minimal_config(), MinimalMessenger()), "t")).json()
     assert info["capabilities"] == {}
+
+
+class NotAsyncGateway:
+    def send_notification(self, bot: str, notification: object) -> None: ...
+
+
+class StoreWithoutNotifications:
+    """A Store of a bridge written before gateways: it has no save_notification."""
+
+
+async def test_roles_default_to_messenger_and_info_leaves_them_out() -> None:
+    assert Config.__dataclass_fields__["roles"].default == (InfoRole.messenger,)
+    info = (await get_info(BridgeApp(minimal_config(), MinimalMessenger()), "t")).json()
+    assert "roles" not in info
+    explicit = minimal_config(roles=["messenger"])
+    assert "roles" not in (await get_info(BridgeApp(explicit, MinimalMessenger()), "t")).json()
+
+
+async def test_info_declares_the_roles() -> None:
+    both = BridgeApp(minimal_config(roles=("messenger", InfoRole.gateway), gateway=FakeGateway()), MinimalMessenger())
+    assert (await get_info(both, "t")).json()["roles"] == ["messenger", "gateway"]
+    only = BridgeApp(minimal_config(roles=["gateway"], gateway=FakeGateway()))
+    info = (await get_info(only, "t")).json()
+    assert info["roles"] == ["gateway"]
+    assert info["capabilities"] == {}
+    assert info["user_lookup"] == "none"
+    assert info["messenger"] == {"name": "Chat"}
+
+
+def test_a_gateway_only_bridge_runs_without_a_messenger() -> None:
+    app = BridgeApp(minimal_config(roles=["gateway"], gateway=FakeGateway()), None)
+    assert app._has_messenger is False
+
+
+def test_refuses_the_gateway_role_without_a_gateway() -> None:
+    error = refusal(minimal_config(roles=["gateway"]), None)
+    assert error == 'roles has "gateway", which needs Config.gateway, but it is None'
+    both = refusal(minimal_config(roles=["messenger", "gateway"]), MinimalMessenger())
+    assert both == error
+
+
+def test_refuses_the_messenger_role_without_a_messenger() -> None:
+    assert refusal(minimal_config(), None) == 'the messenger is None, which the role "messenger" needs'
+    error = refusal(minimal_config(roles=["messenger", "gateway"], gateway=FakeGateway()), None)
+    assert error == 'the messenger is None, which the role "messenger" needs'
+
+
+def test_refuses_what_a_role_does_not_have() -> None:
+    assert refusal(minimal_config(roles=["gateway"], gateway=FakeGateway()), MinimalMessenger()) == (
+        'a messenger is given, but roles lacks "messenger"'
+    )
+    assert refusal(minimal_config(gateway=FakeGateway()), MinimalMessenger()) == (
+        'a gateway is given, but roles lacks "gateway"'
+    )
+    capabilities = Capabilities(group_mentions=True)
+    only = minimal_config(roles=["gateway"], gateway=FakeGateway(), capabilities=capabilities)
+    assert (
+        refusal(only, None) == 'a bridge without the role "messenger" offers no capabilities and has user_lookup "none"'
+    )
+    lookup = minimal_config(roles=["gateway"], gateway=FakeGateway(), user_lookup="login")
+    assert refusal(lookup, None).startswith('a bridge without the role "messenger"')
+
+
+@pytest.mark.parametrize(
+    ("roles", "want"),
+    [
+        ([], "roles is empty: a bridge needs at least one role, messenger or gateway"),
+        ("gateway", "roles is empty: a bridge needs at least one role, messenger or gateway"),
+        (["messenger", "messenger"], 'roles has "messenger" twice'),
+        (["voice"], 'roles has \'voice\', which is neither "messenger" nor "gateway"'),
+    ],
+)
+def test_refuses_roles(roles: Any, want: str) -> None:
+    assert want in refusal(minimal_config(roles=roles), MinimalMessenger()).split("\n")
+
+
+def test_refuses_a_gateway_that_is_not_async_or_a_store_without_notifications() -> None:
+    config = minimal_config(roles=["gateway"], gateway=NotAsyncGateway())
+    error = refusal(config, None)
+    assert "the gateway lacks answer" in error
+    assert "send_notification of the gateway is not a coroutine function" in error
+    store = cast("Any", StoreWithoutNotifications())
+    error = refusal(minimal_config(roles=["gateway"], gateway=FakeGateway(), store=store), None)
+    assert error == "the store lacks save_notification and find_notification (NotificationStore), which a gateway needs"
+    BridgeApp(minimal_config(store=store), MinimalMessenger())

@@ -206,6 +206,54 @@ A few more things to know:
   every exception it logs; keep anything else secret, such as an event's Account link token, out of the exceptions of
   your messenger and your store.
 
+## The role gateway
+
+A bridge can be a Notification gateway: it reaches people outside messengers, by phone call or SMS for example, and
+Muster calls it with `sendNotification`. Declare the role and give the bridge its `Gateway`; a bridge whose only role is
+`gateway` takes no `Messenger`, and its capabilities stay empty and its `user_lookup` `none`:
+
+```python
+config = Config(
+    name="my gateway",
+    version="1.0.0",
+    messenger_name="My phone provider",
+    bots=[Bot(name="main", token=token)],
+    limits=Limits(max_body_length=4000, edit_max_age_seconds=None),
+    roles=["gateway"],  # ["messenger", "gateway"] for a bridge of both, with a Messenger as before
+    gateway=MyGateway(),
+)
+bridge = BridgeApp(config)
+```
+
+1. Implement the protocol `Gateway`: `send_notification(bot, notification)`, which reaches `notification.contact`, reads
+   out or sends `notification.text` in `notification.language`, and answers `NotificationSent(notification_id=...,
+   replayed=False)`; and `answer(bot, event, text)`, which shows Muster's answer to the person who acknowledged,
+   during the call when it is a call. Raise `Invalid` for a contact the provider refuses for good and `Forbidden` for
+   credentials it refuses. `BridgeApp` raises `ConfigError` when `roles` and what each role needs do not fit.
+2. The library keeps the idempotency of the call: a repeated `Idempotency-Key` answers the first `notification_id`
+   with `replayed` `true` without calling the gateway, and refuses a request beyond the protocol — `action.data` over 64
+   bytes, a text over 1,000 code points — as `invalid` before the gateway is called. Neither the contact nor the text
+   reaches the library's logs or answers.
+3. When the person acknowledges, as `notification.action.label` told them, call `await bridge.acknowledge(bot,
+   notification_id)` with the id `send_notification` answered. It queues `notification_acknowledged` with the
+   `action.data` of that notification, which the library keeps for 24 hours (`MemoryStore` does; a `Store` of your own
+   also implements `NotificationStore`), delivered by polling and by push. An id the library did not issue, or a
+   notification without `action`, raises `UnknownNotificationError`, a `ValueError`. Pass `chat`, such as a call id,
+   to get it back in `AcknowledgedNotification.chat`.
+4. Muster answers the event with `answerEvent` while the person waits, and the library hands it to `Gateway.answer`.
+
+[`examples/gateway_bridge.py`](https://github.com/muster-io/muster-bridge-python/blob/master/examples/gateway_bridge.py)
+is a whole gateway in one file: it prints each notification and acknowledges it from `POST /demo/acknowledge`
+`{"notification_id": "n1"}`. Let Muster's check run against it, with a contact, interactively:
+
+```sh
+python examples/gateway_bridge.py --token-file /tmp/bt &
+docker run --rm --network host -v /tmp/bt:/token:ro ghcr.io/muster-io/muster:edge bridge check \
+  http://127.0.0.1:18095 --token-file /token --contact +10000000001
+# WAIT notification_acknowledged: …, notification_id n1 → in another terminal:
+curl -s -X POST -d '{"notification_id":"n1"}' -H 'Content-Type: application/json' 127.0.0.1:18095/demo/acknowledge
+```
+
 ## Mentions of groups and of everyone in the chat
 
 A `Mention` of the message names a person (`kind` `user`, which a Mention without `kind` is), a group of the messenger
@@ -315,7 +363,8 @@ prints `PASS`, `FAIL` or `SKIP` for each; `--forbidden-channel` and `--handle` e
 push (`push`): it prints `PUSH <url>` once its listener (`--push-listen`) is up — point the bridge's push target there,
 with the secret of `--push-secret-file` — and `WAIT press: …, message_id <id>` before it waits. `make conformance`
 plays that person through the example's `POST /demo/press`; do the same in your bridge's tests with your messenger's
-own means.
+own means. A bridge in the role `gateway` runs the steps `notification` and `notification_acknowledged` instead, with
+`--contact`: see _The role gateway_.
 
 ## The protocol copy
 
@@ -340,7 +389,7 @@ only entry point; `make help` lists the targets.
 | `make licenses` | fails on a runtime dependency outside MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0 and MPL-2.0 |
 | `make build` | builds the sdist and the wheel into `dist/` |
 | `make ci` | `lint`, `generate-check`, `spec-check`, `licenses`, `test` and `build`, as a pull request runs them |
-| `make conformance` | installs the built wheel and uvicorn into a fresh virtual environment, runs the example from it with `python -I`, and runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against it three times: every feature, only `thread_messages`, and interactively with push |
+| `make conformance` | installs the built wheel and uvicorn into a fresh virtual environment, runs the example from it with `python -I`, and runs `muster bridge check` from `ghcr.io/muster-io/muster:edge` (`MUSTER_IMAGE`) against it three times: every feature, only `thread_messages`, and interactively with push; then runs the check against `examples/gateway_bridge.py` with `--contact`, interactively |
 | `make clean` | removes `bin/`, `dist/`, `.venv/`, the caches and the coverage data |
 
 ## Contributing, security and licence

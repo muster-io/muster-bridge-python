@@ -16,12 +16,14 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
-from muster_bridge.models import Capabilities, Info, InfoEventDelivery, InfoUserLookup, Limits
+from muster_bridge.models import Capabilities, Info, InfoEventDelivery, InfoRole, InfoUserLookup, Limits
 from muster_bridge.problems import encode_json, validation_problems
-from muster_bridge.store import MemoryStore, Store
+from muster_bridge.store import MemoryStore, NotificationStore, Store
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from muster_bridge.gateway import Gateway
 
 __all__ = ["Bot", "Config", "ConfigError", "PushTarget"]
 
@@ -30,6 +32,7 @@ PUSH_KEY_PREFIX = "whsec_"
 """Opens every push secret; the signing key follows it, in base64."""
 
 _MESSENGER_METHODS = ("post_message", "edit_message", "reply_in_thread", "check_channel", "answer_event")
+_GATEWAY_METHODS = ("send_notification", "answer")
 _SPEC_MISMATCH = "the info this configuration makes does not match api/bridge.yaml: "
 
 
@@ -73,6 +76,12 @@ class Config:
     """The optional features; a member left None is a feature the bridge does not offer."""
     user_lookup: InfoUserLookup | Literal["email", "login", "username", "user_id", "none"] = "none"
     """What findUsers searches by."""
+    roles: Sequence[InfoRole | Literal["messenger", "gateway"]] = (InfoRole.messenger,)
+    """What the bridge is: "messenger" needs the Messenger given to BridgeApp, "gateway" needs Config.gateway, and both
+    make a bridge of both. A bridge whose only role is "gateway" takes no Messenger, and its capabilities stay empty and
+    its user_lookup "none"."""
+    gateway: Gateway | None = None
+    """The calls to the provider of a bridge in the role gateway; None for a bridge without the role."""
     event_delivery: Sequence[InfoEventDelivery | Literal["poll", "push"]] | None = None
     """The event delivery modes the bridge offers; None is both, poll and push."""
     link_url_template: str | None = None
@@ -135,6 +144,7 @@ class Prepared:
     logger: logging.Logger
     poll_offered: bool
     push_offered: bool
+    roles: frozenset[InfoRole]
 
 
 def parse_push_target(target: PushTarget) -> tuple[ParsedTarget | None, list[str]]:
@@ -202,7 +212,8 @@ def _prune(model: BaseModel, data: dict[str, Any]) -> dict[str, Any]:
 
 def prepare(config: Config, messenger: object) -> Prepared:
     """Check the configuration with its messenger and return it prepared; raise ConfigError naming every problem."""
-    problems = _check_messenger(config, messenger) + _check_bots(config)
+    roles, problems = _check_roles(config, messenger)
+    problems += _check_bots(config)
     types = [
         f"{name} is not a muster_bridge.{model.__name__}"
         for name, value, model in (
@@ -216,7 +227,7 @@ def prepare(config: Config, messenger: object) -> Prepared:
     if types:
         problems += types
     else:
-        info_body, info, info_problems = _build_info(config)
+        info_body, info, info_problems = _build_info(config, roles)
         problems += info_problems
     if problems or info is None:
         raise ConfigError(problems)
@@ -232,6 +243,7 @@ def prepare(config: Config, messenger: object) -> Prepared:
         logger=config.logger if config.logger is not None else logging.getLogger("muster_bridge"),
         poll_offered="poll" in info.event_delivery,
         push_offered="push" in info.event_delivery,
+        roles=frozenset(roles),
     )
 
 
@@ -239,9 +251,62 @@ def _has_coroutine(messenger: object, name: str) -> bool:
     return inspect.iscoroutinefunction(getattr(messenger, name, None))
 
 
+def _check_roles(config: Config, messenger: object) -> tuple[tuple[InfoRole, ...], list[str]]:
+    """Return the roles of the configuration and the problems of the roles and of what each needs."""
+    problems: list[str] = []
+    roles: list[InfoRole] = []
+    if isinstance(config.roles, str) or not config.roles:
+        problems.append("roles is empty: a bridge needs at least one role, messenger or gateway")
+    else:
+        for role in config.roles:
+            try:
+                parsed = InfoRole(role)
+            except ValueError:
+                problems.append(f'roles has {role!r}, which is neither "messenger" nor "gateway"')
+                continue
+            if parsed in roles:
+                problems.append(f'roles has "{parsed.value}" twice')
+            else:
+                roles.append(parsed)
+    kept = frozenset(roles)
+    if InfoRole.messenger in kept:
+        problems += _check_messenger(config, messenger)
+    elif messenger is not None:
+        problems.append('a messenger is given, but roles lacks "messenger"')
+    elif kept:
+        capabilities, lookup = config.capabilities, config.user_lookup
+        if capabilities != Capabilities() or lookup != "none":
+            problems.append('a bridge without the role "messenger" offers no capabilities and has user_lookup "none"')
+    if InfoRole.gateway in kept:
+        problems += _check_gateway(config)
+    elif config.gateway is not None:
+        problems.append('a gateway is given, but roles lacks "gateway"')
+    return tuple(roles), problems
+
+
+def _check_gateway(config: Config) -> list[str]:
+    gateway = config.gateway
+    if gateway is None:
+        return ['roles has "gateway", which needs Config.gateway, but it is None']
+    problems = []
+    for name in _GATEWAY_METHODS:
+        if not hasattr(gateway, name):
+            problems.append(f"the gateway lacks {name}")
+        elif not _has_coroutine(gateway, name):
+            problems.append(
+                f"{name} of the gateway is not a coroutine function: define it with async def, or mark a wrapper "
+                "that returns a coroutine with inspect.markcoroutinefunction"
+            )
+    if config.store is not None and not isinstance(config.store, NotificationStore):
+        problems.append(
+            "the store lacks save_notification and find_notification (NotificationStore), which a gateway needs"
+        )
+    return problems
+
+
 def _check_messenger(config: Config, messenger: object) -> list[str]:
     if messenger is None:
-        return ["the messenger is None"]
+        return ['the messenger is None, which the role "messenger" needs']
     problems = []
     for name in _MESSENGER_METHODS:
         if not hasattr(messenger, name):
@@ -299,7 +364,7 @@ def _check_bots(config: Config) -> list[str]:
     return problems
 
 
-def _build_info(config: Config) -> tuple[bytes, Info | None, list[str]]:
+def _build_info(config: Config, roles: tuple[InfoRole, ...]) -> tuple[bytes, Info | None, list[str]]:
     """Return info as served, and as checked against the specification, or the problems that stop it."""
     problems = []
     if config.limits.max_body_length > MAX_BODY_LENGTH_CAP:
@@ -315,6 +380,9 @@ def _build_info(config: Config) -> tuple[bytes, Info | None, list[str]]:
         "user_lookup": config.user_lookup,
         "event_delivery": list(config.event_delivery) if config.event_delivery is not None else ["poll", "push"],
     }
+    if roles and roles != (InfoRole.messenger,):
+        # A messenger-only bridge leaves roles out, as before roles existed, so that an older Muster still reads it.
+        info["roles"] = [role.value for role in roles]
     if config.link_url_template is not None:
         info["link_url_template"] = config.link_url_template
     try:

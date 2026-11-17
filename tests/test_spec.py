@@ -11,21 +11,27 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 import httpx
 import pytest
 from conftest import (
+    ACK_UPDATE,
+    ACTION_BODY,
     ALICE,
+    BOTH_ROLES,
     DM_BODY,
     EDIT_BODY,
     LINK_TOKEN,
+    NOTIFICATION_BODY,
     POST_BODY,
     REPLY_BODY,
     TOKEN_MAIN,
     Callbacks,
     FailingStore,
+    FakeGateway,
     FakeMessenger,
     Harness,
     MakeBridge,
     all_capabilities,
     answer_body,
     event_id_of,
+    problem_of,
     raising,
     two_bots,
     with_body,
@@ -44,6 +50,7 @@ from muster_bridge import (
     CapabilitiesPrivateAnswer,
     Forbidden,
     Gone,
+    InfoRole,
     Invalid,
     KeyClaim,
     KeyState,
@@ -73,10 +80,13 @@ REPLY = "/v1/messages/m1/thread-replies"
 CHECK = "/v1/channels/alerts/check"
 USERS = "/v1/users"
 DM = "/v1/direct-messages"
+NOTIFY = "/v1/notifications"
 ANSWERS = "/v1/answers"
 EVENTS = "/v1/events"
 ANSWER = answer_body(event_id_of("main", "press", "u1"))
 """The body of an answer to the press reported before every answerEvent exchange."""
+ANSWER_NOTIFICATION = answer_body(event_id_of("main", "notification_acknowledged", ACK_UPDATE))
+"""The body of an answer to a notification_acknowledged that its exchange's setup reports."""
 
 
 def spec_operations() -> dict[str, tuple[str, str, dict[str, Any]]]:
@@ -143,6 +153,12 @@ async def every_event(bridge: Harness, _: FailingStore) -> None:
     await app.thread_message("main", update_id="3", message_id="m1", thread_ref="t-m1", user=bob, text="ack")
     await app.direct_message("main", update_id="4", user=ALICE, text=LINK_TOKEN)
     await app.message_deleted("main", update_id="5", message_id="m1")
+
+
+async def acknowledged(bridge: Harness, _: FailingStore) -> None:
+    sent = await bridge.call("POST", NOTIFY, key="k0", body=ACTION_BODY)
+    assert sent.status_code == 201, sent.text
+    await bridge.app.acknowledge("main", sent.json()["notification_id"], update_id=ACK_UPDATE)
 
 
 @dataclass(frozen=True)
@@ -236,6 +252,26 @@ EXCHANGES = [
     Exchange("answerEvent", "404", "POST", ANSWERS, 404, answer_body("nope")),
     Exchange("answerEvent", "429", "POST", ANSWERS, 429, ANSWER, error=limited),
     Exchange("answerEvent", "500", "POST", ANSWERS, 500, ANSWER, error=broken),
+    Exchange("answerEvent", "200 notification", "POST", ANSWERS, 200, ANSWER_NOTIFICATION, setup=acknowledged),
+    Exchange("sendNotification", "201", "POST", NOTIFY, 201, NOTIFICATION_BODY),
+    Exchange("sendNotification", "201 action", "POST", NOTIFY, 201, ACTION_BODY),
+    Exchange("sendNotification", "201 replayed", "POST", NOTIFY, 201, ACTION_BODY, setup=replay(NOTIFY, ACTION_BODY)),
+    Exchange("sendNotification", "400 spec", "POST", NOTIFY, 400, "{}", invalid=True),
+    Exchange(
+        "sendNotification",
+        "400 text",
+        "POST",
+        NOTIFY,
+        400,
+        NOTIFICATION_BODY.replace("HighErrorRate", "x" * 1001),
+        invalid=True,
+    ),
+    Exchange("sendNotification", "400 contact", "POST", NOTIFY, 400, NOTIFICATION_BODY, error=invalid),
+    Exchange("sendNotification", "401", "POST", NOTIFY, 401, NOTIFICATION_BODY, token="wrong"),
+    Exchange("sendNotification", "403", "POST", NOTIFY, 403, NOTIFICATION_BODY, error=forbidden),
+    Exchange("sendNotification", "429", "POST", NOTIFY, 429, NOTIFICATION_BODY, error=limited),
+    Exchange("sendNotification", "500", "POST", NOTIFY, 500, NOTIFICATION_BODY, error=broken),
+    Exchange("sendNotification", "500 running", "POST", NOTIFY, 500, NOTIFICATION_BODY, setup=running_key),
     Exchange("pollEvents", "200 every event", "GET", EVENTS + "?wait=0", 200, setup=every_event),
     Exchange("pollEvents", "200 empty", "GET", EVENTS + "?wait=0", 200),
     Exchange("pollEvents", "400 cursor", "GET", EVENTS + "?cursor=x", 400),
@@ -285,16 +321,8 @@ def test_the_copy_is_the_3_1_document_under_mit() -> None:
     assert DOCUMENT["info"]["license"]["identifier"] == "MIT"
 
 
-GATEWAY_OPERATIONS = frozenset({"sendNotification"})
-"""The operations of the role gateway, which this messenger-only library does not serve."""
-
-
 def test_every_operation_of_the_specification_is_routed() -> None:
-    spec = sorted(
-        f"{method} {path} {op_id}"
-        for op_id, (method, path, _) in spec_operations().items()
-        if op_id not in GATEWAY_OPERATIONS
-    )
+    spec = sorted(f"{method} {path} {op_id}" for op_id, (method, path, _) in spec_operations().items())
     table = sorted(f"{op.method} {op.template} {op.op_id}" for op in OPERATIONS)
     assert spec == table
     assert set(DECLARED) == {op.op_id for op in OPERATIONS}
@@ -302,8 +330,6 @@ def test_every_operation_of_the_specification_is_routed() -> None:
 
 def test_declared_classes_match_the_specification() -> None:
     for op_id, (_, _, operation) in spec_operations().items():
-        if op_id in GATEWAY_OPERATIONS:
-            continue
         statuses = set(operation["responses"])
         unknown = {s for s in statuses if s not in STATUS_CLASS and s != "401" and not s.startswith("2")}
         assert not unknown, f"{op_id} declares {unknown}, which no class has"
@@ -322,8 +348,9 @@ def test_every_operation_has_an_exchange() -> None:
 async def test_requests_and_answers_match_the_specification(make_bridge: MakeBridge, exchange: Exchange) -> None:
     store = FailingStore()
     messenger = FakeMessenger()
-    bridge = await make_bridge(messenger=messenger, store=store)
-    if exchange.op == "answerEvent":
+    gateway = FakeGateway()
+    bridge = await make_bridge(messenger=messenger, store=store, roles=BOTH_ROLES, gateway=gateway)
+    if exchange.op == "answerEvent" and exchange.setup is None:
         await bridge.report_press("u1")
     if exchange.setup is not None:
         await exchange.setup(bridge, store)
@@ -331,18 +358,27 @@ async def test_requests_and_answers_match_the_specification(make_bridge: MakeBri
         failure = raising(exchange.error())
         for name in ("post", "edit", "reply", "check", "answer", "find", "dm", "delete"):
             setattr(messenger, name, failure)
+        gateway.send = failure
     key = "k1" if exchange.op in IDEMPOTENT else None
     response = await bridge.call(exchange.method, exchange.path, token=exchange.token, key=key, body=exchange.body)
     assert response.status_code == exchange.status, response.text
     check_exchange(exchange.op, response, valid_request=not exchange.invalid and exchange.token == TOKEN_MAIN)
 
 
-async def test_info_claims_no_gateway_role_and_notifications_are_not_served(make_bridge: MakeBridge) -> None:
+async def test_info_claims_no_role_and_notifications_are_refused_by_a_messenger(make_bridge: MakeBridge) -> None:
     bridge = await make_bridge()
     info = (await bridge.call("GET", "/v1/info")).json()
     assert "roles" not in info
-    response = await bridge.call("POST", "/v1/notifications", key="k1", body="{}")
-    assert response.status_code == 404
+    response = await bridge.call("POST", NOTIFY, key="k1", body=NOTIFICATION_BODY)
+    problem_of(response, 400, "invalid")
+    check_exchange("sendNotification", response, valid_request=True)
+
+
+async def test_info_of_a_gateway_matches_the_specification(make_bridge: MakeBridge) -> None:
+    bridge = await make_bridge(gateway_only=True)
+    response = await bridge.call("GET", "/v1/info")
+    assert response.json()["roles"] == [InfoRole.gateway]
+    check_exchange("getInfo", response, valid_request=True)
 
 
 async def test_info_with_every_member_matches_the_specification(make_bridge: MakeBridge) -> None:
@@ -354,6 +390,7 @@ async def test_info_with_every_member_matches_the_specification(make_bridge: Mak
     bridge = await make_bridge(
         capabilities=capabilities,
         link_url_template="https://chat.example.org/bots/muster?start={token}",
+        roles=BOTH_ROLES,
         limits=Limits(
             max_body_length=100_000,
             edit_max_age_seconds=172800,
@@ -372,6 +409,7 @@ async def test_info_with_every_member_matches_the_specification(make_bridge: Mak
         "user_lookup",
         "event_delivery",
         "link_url_template",
+        "roles",
     }
     assert len(info["capabilities"]) == len(type(capabilities).model_fields)
     assert len(info["limits"]) == len(Limits.model_fields)
@@ -407,15 +445,17 @@ class Push:
 
 async def test_pushes_match_the_webhook(make_bridge: MakeBridge, callbacks: Callbacks) -> None:
     callback = callbacks.add()
-    bridge = await make_bridge(bots=two_bots(main=callback.target()))
+    bridge = await make_bridge(bots=two_bots(main=callback.target()), roles=BOTH_ROLES)
     await every_event(bridge, FailingStore())
     types = set()
-    for _ in range(5):
+    await bridge.call("POST", NOTIFY, key="k0", body=ACTION_BODY)
+    await bridge.app.acknowledge("main", "n1")
+    for _ in range(6):
         pushed = await callback.next()
         headers = Headers(list(pushed.headers.items()))
         SPEC.validate_webhook_request(Push(pushed.body, RequestParameters(header=headers)))
         types.add(json.loads(pushed.body)["type"])
-    assert types == {"press", "thread_message", "account_link", "message_deleted"}
+    assert types == {"press", "thread_message", "account_link", "message_deleted", "notification_acknowledged"}
 
 
 async def test_a_push_without_its_signature_does_not_match(make_bridge: MakeBridge, callbacks: Callbacks) -> None:

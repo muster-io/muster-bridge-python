@@ -13,14 +13,23 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from itertools import count
 from operator import itemgetter
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from muster_bridge.messenger import EventType
 
-__all__ = ["KeyClaim", "KeyState", "MemoryStore", "Store", "StoredAnswer", "StoredEvent", "UnknownCursorError"]
+__all__ = [
+    "KeyClaim",
+    "KeyState",
+    "MemoryStore",
+    "NotificationStore",
+    "Store",
+    "StoredAnswer",
+    "StoredEvent",
+    "UnknownCursorError",
+]
 
 
 class KeyState(enum.Enum):
@@ -123,6 +132,22 @@ class Store(Protocol):
         ...
 
 
+@runtime_checkable
+class NotificationStore(Protocol):
+    """Keeps, per bot, the action data of each notification that carried an action, for a bridge in the role gateway.
+
+    A Store that also implements it serves a gateway; MemoryStore does. Config checks it when the role is declared.
+    """
+
+    async def save_notification(self, bot: str, notification_id: str, data: str, until: datetime) -> None:
+        """Keep the action data of the notification, at least until `until`."""
+        ...
+
+    async def find_notification(self, bot: str, notification_id: str, now: datetime) -> str | None:
+        """Return the action data kept for the notification, or None when none is kept or its time ended."""
+        ...
+
+
 @dataclass(slots=True)
 class _KeyEntry:
     """A claim, named by claim_id, or the stored answer of a key."""
@@ -187,10 +212,13 @@ class MemoryStore:
         self._expiry_order = count()
         self._claims = count(1)
         self._queues: dict[str, _Queue] = {}
+        self._notifications: dict[tuple[str, str], tuple[str, datetime]] = {}
+        self._notification_expiry: list[tuple[datetime, int, tuple[str, str]]] = []
 
     async def claim_key(self, bot: str, key: str, now: datetime, until: datetime) -> KeyClaim:
         """See Store.claim_key."""
         self._purge_keys(now)
+        self._purge_notifications(now)
         entry = self._keys.get((bot, key))
         if entry is not None and entry.until > now:
             if entry.answer is not None:
@@ -260,6 +288,28 @@ class MemoryStore:
         if event is None or event.until <= now:
             return None
         return event
+
+    async def save_notification(self, bot: str, notification_id: str, data: str, until: datetime) -> None:
+        """See NotificationStore.save_notification."""
+        ref = (bot, notification_id)
+        self._notifications[ref] = (data, until)
+        heapq.heappush(self._notification_expiry, (until, next(self._expiry_order), ref))
+
+    async def find_notification(self, bot: str, notification_id: str, now: datetime) -> str | None:
+        """See NotificationStore.find_notification."""
+        self._purge_notifications(now)
+        kept = self._notifications.get((bot, notification_id))
+        if kept is None or kept[1] <= now:
+            return None
+        return kept[0]
+
+    def _purge_notifications(self, now: datetime) -> None:
+        """Forget the notifications whose time ended; a later save of the same id has its own expiry."""
+        while self._notification_expiry and self._notification_expiry[0][0] <= now:
+            until, _, ref = heapq.heappop(self._notification_expiry)
+            kept = self._notifications.get(ref)
+            if kept is not None and kept[1] == until:
+                del self._notifications[ref]
 
     def _set_key(self, ref: tuple[str, str], entry: _KeyEntry) -> None:
         self._keys[ref] = entry
