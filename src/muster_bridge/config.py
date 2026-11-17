@@ -329,6 +329,7 @@ def _build_info(config: Config) -> tuple[bytes, Info | None, list[str]]:
         ("/event_delivery", checked.event_delivery),
         ("/capabilities/buttons/styles", checked.capabilities.buttons.styles if checked.capabilities.buttons else []),
         ("/capabilities/private_answers", checked.capabilities.private_answers or []),
+        ("/capabilities/everyone_mentions", checked.capabilities.everyone_mentions or []),
     ):
         if len(set(items)) != len(items):
             problems.append(f"{_SPEC_MISMATCH}{pointer}: the items are not unique")

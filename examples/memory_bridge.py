@@ -9,10 +9,11 @@ Muster, muster bridge check or a person with curl can try the Bridge protocol wi
     python examples/memory_bridge.py --token-file /tmp/bt
 
 It offers every feature, or with BRIDGE_FEATURES only those it lists, comma-separated: buttons, thread_messages,
-direct_messages (which also turns on user_lookup login), private_answers, native_mentions, quiet_messages,
-status_color, deletion_events and delete. Outside the protocol it serves POST /demo/press {"message_id", "user"},
-which presses the first button of the message as the person with that login. Unlike the protocol, which needs the
-token, it has no authentication of its own: the example listens on loopback by default.
+direct_messages (which also turns on user_lookup login), private_answers, native_mentions, group_mentions,
+everyone_mentions (channel and here), quiet_messages, status_color, deletion_events and delete. Outside the protocol it
+serves POST /demo/press {"message_id", "user"}, which presses the first button of the message as the person with that
+login. Unlike the protocol, which needs the token, it has no authentication of its own: the example listens on
+loopback by default.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from muster_bridge import (
     CapabilitiesButtons,
     CapabilitiesDelete,
     CapabilitiesDirectMessages,
+    CapabilitiesEveryoneMention,
     CapabilitiesPrivateAnswer,
     CapabilitiesThreadMessages,
     Config,
@@ -53,6 +55,7 @@ from muster_bridge import (
     Gone,
     Limits,
     Mention,
+    MentionKind,
     MessageContent,
     MessageEdited,
     MessageInput,
@@ -73,11 +76,17 @@ FEATURES = (
     "direct_messages",
     "private_answers",
     "native_mentions",
+    "group_mentions",
+    "everyone_mentions",
     "quiet_messages",
     "status_color",
     "deletion_events",
     "delete",
 )
+EVERYONE_MENTIONS = [
+    CapabilitiesEveryoneMention.EveryoneMentionChannel,
+    CapabilitiesEveryoneMention.EveryoneMentionHere,
+]
 MAX_DEMO_BODY = 64 << 10
 
 log = logging.getLogger("memory_bridge")
@@ -146,6 +155,8 @@ def capabilities(on: set[str]) -> Capabilities:
         direct_messages=CapabilitiesDirectMessages(bot_can_start=True) if "direct_messages" in on else None,
         private_answers=[CapabilitiesPrivateAnswer.ephemeral] if "private_answers" in on else None,
         native_mentions=True if "native_mentions" in on else None,
+        group_mentions=True if "group_mentions" in on else None,
+        everyone_mentions=EVERYONE_MENTIONS if "everyone_mentions" in on else None,
         quiet_messages=True if "quiet_messages" in on else None,
         status_color=True if "status_color" in on else None,
         delete=CapabilitiesDelete(max_age_seconds=None) if "delete" in on else None,
@@ -178,6 +189,8 @@ class MemoryChat:
     people: dict[str, Person]
     private: bool
     native: bool
+    groups: bool = False
+    everyone: bool = False
     id_prefix: str = field(default_factory=lambda: secrets.token_hex(3))
     messages: dict[str, Message] = field(default_factory=dict)
     last: int = 0
@@ -332,7 +345,16 @@ class MemoryChat:
 
     def _mentions(self, body: str, mentions: list[Mention]) -> str:
         """Return body with its Mention markers as the messenger shows them: @login or the name."""
-        return replace_mentions(body, mentions, lambda m: f"@{m.external_id}" if self.native else m.display_name)
+        return replace_mentions(body, mentions, self._mention)
+
+    def _mention(self, mention: Mention) -> str | None:
+        """Return how the messenger shows a Mention, or None for a kind it does not offer: the marker's link text."""
+        if mention.kind == MentionKind.MentionKindGroup:
+            return f"@{mention.external_id}" if self.groups else None
+        if mention.kind == MentionKind.MentionKindEveryone:
+            listed = {name.value for name in EVERYONE_MENTIONS}
+            return f"@{mention.external_id}" if self.everyone and mention.external_id in listed else None
+        return f"@{mention.external_id}" if self.native else mention.display_name
 
 
 def labels(buttons: list[Button]) -> list[str]:
@@ -370,6 +392,8 @@ def configure(args: argparse.Namespace) -> tuple[Config, MemoryChat]:
         people=people,
         private="private_answers" in on,
         native="native_mentions" in on,
+        groups="group_mentions" in on,
+        everyone="everyone_mentions" in on,
     )
     return config, chat
 

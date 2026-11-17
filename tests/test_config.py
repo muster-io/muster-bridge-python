@@ -20,6 +20,7 @@ from muster_bridge import (
     Capabilities,
     CapabilitiesButtons,
     CapabilitiesDelete,
+    CapabilitiesEveryoneMention,
     CapabilitiesPrivateAnswer,
     Config,
     ConfigError,
@@ -102,6 +103,8 @@ async def test_info_with_every_member() -> None:
         "direct_messages": {"bot_can_start": True},
         "private_answers": ["ephemeral"],
         "native_mentions": True,
+        "group_mentions": True,
+        "everyone_mentions": ["channel", "here"],
         "quiet_messages": True,
         "status_color": True,
         "delete": {"max_age_seconds": None},
@@ -272,6 +275,28 @@ def nan_limits() -> Limits:
             id="duplicate private answer",
         ),
         pytest.param(
+            {
+                "capabilities": Capabilities(
+                    everyone_mentions=[
+                        CapabilitiesEveryoneMention.EveryoneMentionHere,
+                        CapabilitiesEveryoneMention.EveryoneMentionHere,
+                    ]
+                )
+            },
+            "/capabilities/everyone_mentions: the items are not unique",
+            id="duplicate everyone mention",
+        ),
+        pytest.param(
+            {"capabilities": Capabilities.model_construct(everyone_mentions=["channel", "room"])},
+            "/capabilities/everyone_mentions/1: Input should be 'channel', 'here', 'all' or 'everyone'",
+            id="unknown everyone mention",
+        ),
+        pytest.param(
+            {"capabilities": Capabilities.model_construct(group_mentions="yes")},
+            "/capabilities/group_mentions: Input should be a valid boolean",
+            id="group_mentions not a boolean",
+        ),
+        pytest.param(
             {"capabilities": Capabilities(delete=CapabilitiesDelete.model_construct(max_age_seconds=0))},
             "/capabilities/delete/max_age_seconds: Input should be greater than or equal to 1",
             id="delete max_age_seconds 0",
@@ -412,3 +437,14 @@ async def test_system_clock() -> None:
     clock = SystemClock()
     assert clock.now().tzinfo is UTC
     await clock.sleep(0)
+
+
+async def test_group_and_everyone_mentions_are_declared_in_info() -> None:
+    capabilities = Capabilities(group_mentions=True, everyone_mentions=list(CapabilitiesEveryoneMention))
+    info = (await get_info(BridgeApp(minimal_config(capabilities=capabilities), MinimalMessenger()), "t")).json()
+    assert info["capabilities"] == {"group_mentions": True, "everyone_mentions": ["channel", "here", "all", "everyone"]}
+
+
+async def test_info_declares_no_group_or_everyone_mentions_by_default() -> None:
+    info = (await get_info(BridgeApp(minimal_config(), MinimalMessenger()), "t")).json()
+    assert info["capabilities"] == {}

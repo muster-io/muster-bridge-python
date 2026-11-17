@@ -20,12 +20,18 @@ _TAIL = "](muster-mention:"
 _REF = re.compile(r"\]\(muster-mention:([a-z0-9]{1,16})\)")
 
 
-def replace_mentions(body: str, mentions: Sequence[Mention], render: Callable[[Mention], str] | None) -> str:
+def replace_mentions(body: str, mentions: Sequence[Mention], render: Callable[[Mention], str | None] | None) -> str:
     """Replace each Mention marker [@name](muster-mention:ref) of body by what render makes of its entry of mentions.
 
-    render makes the messenger's own mention for a bridge with native_mentions, or the plain name. A marker whose ref
-    names no entry, or every marker when render is None, becomes its link text, the @name as the body escapes it. The
-    first entry of a ref wins. The rest of body is unchanged. It takes time linear in the length of body.
+    render gets the whole entry and makes the messenger's own mention of it, or the plain name. Look at its kind: a
+    person (user, also when the entry has no kind), a group, whose external_id and display_name are the group's name,
+    or everyone in the chat, whose two fields are the symbolic name (channel, here, all or everyone). A bridge renders
+    a group or everyone mention whether or not it declares native_mentions, and never refuses an entry for its kind:
+    Muster decides from a copy of info that may be older than the bridge's own, so render returns None for a kind the
+    bridge did not declare (capabilities.group_mentions, capabilities.everyone_mentions). A marker whose ref names no
+    entry, a marker whose render returns None, and every marker when render is None, become the link text, the @name
+    as the body escapes it. The first entry of a ref wins. The rest of body is unchanged. It takes time linear in the
+    length of body.
     """
     if _TAIL not in body:
         return body
@@ -36,7 +42,8 @@ def replace_mentions(body: str, mentions: Sequence[Mention], render: Callable[[M
     done = 0
     for start, end, text, ref in _markers(body):
         found = by_ref.get(ref)
-        parts += (body[done:start], render(found) if found is not None and render is not None else text)
+        shown = render(found) if found is not None and render is not None else None
+        parts += (body[done:start], text if shown is None else shown)
         done = end
     parts.append(body[done:])
     return "".join(parts)

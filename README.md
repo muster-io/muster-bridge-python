@@ -39,8 +39,8 @@ or with the package installed beside uvicorn (`pip install muster-bridge uvicorn
 It listens on `127.0.0.1:18095` (`--listen`), knows the channels `alerts` and `ops` (`--channels`) and the people
 `alice` and `bob` (`--users`), and offers every feature of the protocol, or only those that `BRIDGE_FEATURES` lists:
 `buttons`, `thread_messages`, `direct_messages` (which also turns on `user_lookup` `login`), `private_answers`,
-`native_mentions`, `quiet_messages`, `status_color`, `deletion_events` and `delete`. With `--push-url` and
-`--push-secret-file` it pushes its events as well. In another terminal:
+`native_mentions`, `group_mentions`, `everyone_mentions`, `quiet_messages`, `status_color`, `deletion_events` and
+`delete`. With `--push-url` and `--push-secret-file` it pushes its events as well. In another terminal:
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:18095/v1/info          # 401: no token
@@ -179,7 +179,8 @@ reach Muster late.
    `UnknownBotError`, `NotOfferedError` for a feature the bridge does not offer and `InvalidEventError` for an event
    that would not match the protocol. From another thread, hand the coroutine to the loop with
    `asyncio.run_coroutine_threadsafe`.
-5. Turn Mention markers into native mentions or plain names with `replace_mentions(body, mentions, render)`.
+5. Turn Mention markers into native mentions or plain names with `replace_mentions(body, mentions, render)`; see
+   _Mentions of groups and of everyone in the chat_ below.
 6. For pushes, give a bot a `PushTarget` — the callback URL and the push secret that its Bridge Connection in Muster
    shows — in `Bot(push=...)` or later with `bridge.set_push(bot, target)`, from the thread of the event loop that
    serves the bridge (from another thread, `loop.call_soon_threadsafe(bridge.set_push, bot, target)`). The pushers
@@ -204,6 +205,56 @@ A few more things to know:
   token, a push secret or an Account link token, and it replaces the bots' tokens and push secrets in the text of
   every exception it logs; keep anything else secret, such as an event's Account link token, out of the exceptions of
   your messenger and your store.
+
+## Mentions of groups and of everyone in the chat
+
+A `Mention` of the message names a person (`kind` `user`, which a Mention without `kind` is), a group of the messenger
+(`group`) or everyone in the chat (`everyone`). For a group, `external_id` and `display_name` both carry the name an
+Admin typed, which the bridge maps to its messenger's group; for everyone in the chat they carry the symbolic name:
+`channel`, `here`, `all` or `everyone`. Declare what the messenger has in `Capabilities`: `group_mentions=True`, and
+`everyone_mentions` with the symbolic names, each once, as `CapabilitiesEveryoneMention` members. A name outside the
+four fails when `Capabilities` is built (pydantic's `ValidationError`), and a repeated one makes `BridgeApp` raise
+`ConfigError`. Muster sends a group or everyone mention only while its copy of
+`info` declares it, whether or not the bridge has `native_mentions`.
+
+`replace_mentions` hands `render` the whole entry, with its `kind`. The library never refuses a Mention for its kind,
+because Muster decides from a copy of `info` that may be older than the bridge's own: when `render` returns `None` for
+a kind the bridge did not declare, the marker becomes its link text.
+The protocol's own models stay closed, so a `kind` beyond `user`, `group` and `everyone` is answered `invalid`, as the
+specification says; Muster sends no other kind in protocol version 1.
+
+```python
+from muster_bridge import Capabilities, CapabilitiesEveryoneMention, Mention, MentionKind, replace_mentions
+
+capabilities = Capabilities(
+    native_mentions=True,
+    group_mentions=True,
+    everyone_mentions=[CapabilitiesEveryoneMention.EveryoneMentionHere],
+)
+
+
+def render_mention(mention: Mention) -> str | None:
+    """Render a Mention for a messenger that writes <@id> for a person, <!group:name> and <!here>."""
+    if mention.kind == MentionKind.MentionKindGroup and capabilities.group_mentions:
+        return f"<!group:{mention.external_id}>"
+    if mention.kind == MentionKind.MentionKindEveryone:
+        names = [name.value for name in capabilities.everyone_mentions or []]
+        return f"<!{mention.external_id}>" if mention.external_id in names else None
+    if mention.kind == MentionKind.MentionKindUser:
+        return f"<@{mention.external_id}>"
+    return None
+
+
+body = "[@Alice](muster-mention:m1) [@oncall](muster-mention:m2) [@here](muster-mention:m3) [@all](muster-mention:m4)"
+mentions = [
+    Mention(ref="m1", external_id="u-alice", display_name="Alice"),
+    Mention(ref="m2", kind=MentionKind.MentionKindGroup, external_id="oncall", display_name="oncall"),
+    Mention(ref="m3", kind=MentionKind.MentionKindEveryone, external_id="here", display_name="here"),
+    Mention(ref="m4", kind=MentionKind.MentionKindEveryone, external_id="all", display_name="all"),
+]
+text = replace_mentions(body, mentions, render_mention)
+assert text == "<@u-alice> <!group:oncall> <!here> @all"  # all is not declared: its link text
+```
 
 ## Rendering the layout
 

@@ -59,6 +59,13 @@ class CapabilitiesPrivateAnswer(StrEnum):
     popup = "popup"
 
 
+class CapabilitiesEveryoneMention(StrEnum):
+    EveryoneMentionChannel = "channel"
+    EveryoneMentionHere = "here"
+    EveryoneMentionAll = "all"
+    EveryoneMentionEveryone = "everyone"
+
+
 class CapabilitiesDelete(BaseModel):
     max_age_seconds: int | None = Field(..., ge=1)
 
@@ -97,17 +104,32 @@ class Button(BaseModel):
     )
 
 
+class MentionKind(StrEnum):
+    MentionKindUser = "user"
+    MentionKindGroup = "group"
+    MentionKindEveryone = "everyone"
+
+
 class Mention(BaseModel):
     ref: str = Field(
         ..., description="Names the marker `muster-mention:<ref>` in the body.", pattern="^[a-z0-9]{1,16}$"
     )
+    kind: MentionKind = Field(
+        default=MentionKind.MentionKindUser,
+        description="What the Mention names; missing, it is `user`. Muster sends the Mention of a person without it.",
+    )
     external_id: str = Field(
         ...,
-        description="The account's id in the messenger, as the bridge reported it when the account was linked.",
+        description="For a person, the account's id in the messenger, as the bridge reported it when the account was linked; for a group, the name an Admin typed for the Team mention or the Destination's entry, 1 to 64 letters, digits, `.`, `_` and `-` starting with a letter or a digit, which the bridge maps to its messenger's group; for everyone in the chat, the symbolic name: `channel`, `here`, `all` or `everyone`.",
         max_length=512,
         min_length=1,
     )
-    display_name: str = Field(..., max_length=200, min_length=1)
+    display_name: str = Field(
+        ...,
+        description="The name the marker shows; for a group its name and for everyone in the chat its symbolic name, as `external_id`.",
+        max_length=200,
+        min_length=1,
+    )
 
 
 class Link(BaseModel):
@@ -444,6 +466,14 @@ class Capabilities(BaseModel):
     )
     native_mentions: bool | None = Field(
         default=None, description="Mention markers become the messenger's own mentions, which notify the person."
+    )
+    group_mentions: bool | None = Field(
+        default=None,
+        description="The bridge renders a group mention that Muster sends as a `mentions` entry of the kind `group`; the Team mentions and group entries of a Destination need it. Missing or false, Muster offers no group mention for the bridge's Connections.",
+    )
+    everyone_mentions: list[CapabilitiesEveryoneMention] | None = Field(
+        default=None,
+        description="The mentions of everyone in the chat that the bridge's messenger has, by their symbolic names. Muster sends only those listed here, each as a `mentions` entry of the kind `everyone`; missing or empty, none.",
     )
     quiet_messages: bool | None = Field(
         default=None, description="The messenger can post a new message without notifying anyone (`notify` false)."

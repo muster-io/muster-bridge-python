@@ -54,8 +54,12 @@ info:
     paragraphs, hard line breaks, emphasis, strong emphasis, strikethrough, code spans, links, bullet lists and block
     quotes; never headings, tables, images or raw HTML. Alert data in the body is already escaped for CommonMark and
     cannot mention anyone. Links are `http(s)` links, plus Mention markers: a link `[@Display Name](muster-mention:<ref>)`
-    whose `ref` names an entry of `mentions`. A bridge with `native_mentions` renders the marker as its messenger's
-    mention of that account; any other bridge renders the link text alone, as plain text. Muster keeps the body within
+    whose `ref` names an entry of `mentions`. A bridge with `native_mentions` renders the marker of a person as its
+    messenger's mention of that account; any other bridge renders the link text alone, as plain text. Muster sends the
+    marker of a group, whose entry has the `kind` `group`, only while its copy of `info`, at most `bridge.info_max_age`
+    (10 minutes) old, declares `group_mentions`, and that of everyone in the chat, of the `kind` `everyone`, only while
+    that copy lists its symbolic name in `everyone_mentions`; the bridge renders either as its messenger's mention of
+    the group or of everyone in the chat, whether or not it declares `native_mentions`. Muster keeps the body within
     `limits.max_body_length` code points; the bridge makes the final cut where its rendered markup needs it — never inside
     an entity, a tag or a surrogate pair — and reports it with `truncated`.
 
@@ -826,6 +830,29 @@ components:
         native_mentions:
           type: boolean
           description: Mention markers become the messenger's own mentions, which notify the person.
+        group_mentions:
+          type: boolean
+          description: The bridge renders a group mention that Muster sends as a `mentions` entry of the kind `group`;
+            the Team mentions and group entries of a Destination need it. Missing or false, Muster offers no group
+            mention for the bridge's Connections.
+        everyone_mentions:
+          type: array
+          description: The mentions of everyone in the chat that the bridge's messenger has, by their symbolic names.
+            Muster sends only those listed here, each as a `mentions` entry of the kind `everyone`; missing or empty,
+            none.
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+            - channel
+            - here
+            - all
+            - everyone
+            x-enum-varnames:
+            - EveryoneMentionChannel
+            - EveryoneMentionHere
+            - EveryoneMentionAll
+            - EveryoneMentionEveryone
         quiet_messages:
           type: boolean
           description: The messenger can post a new message without notifying anyone (`notify` false).
@@ -899,6 +926,11 @@ components:
           pattern: ^[!-~]{1,64}$
     Mention:
       type: object
+      description: 'One Mention of the envelope, which a marker `[@Display Name](muster-mention:<ref>)` in the body
+        places: a person (`kind` `user`, the default), a group of the messenger (`group`), or everyone in the chat
+        (`everyone`). Muster sends `group` only while its copy of the bridge''s `info`, at most `bridge.info_max_age`
+        (10 minutes) old, declares `group_mentions`, and `everyone` only with a symbolic name that copy lists in
+        `everyone_mentions`; it sends a person without `kind`.'
       required:
       - ref
       - external_id
@@ -908,15 +940,33 @@ components:
           type: string
           description: Names the marker `muster-mention:<ref>` in the body.
           pattern: ^[a-z0-9]{1,16}$
+        kind:
+          type: string
+          description: What the Mention names; missing, it is `user`. Muster sends the Mention of a person without
+            it.
+          enum:
+          - user
+          - group
+          - everyone
+          default: user
+          x-enum-varnames:
+          - MentionKindUser
+          - MentionKindGroup
+          - MentionKindEveryone
         external_id:
           type: string
           minLength: 1
           maxLength: 512
-          description: The account's id in the messenger, as the bridge reported it when the account was linked.
+          description: 'For a person, the account''s id in the messenger, as the bridge reported it when the account
+            was linked; for a group, the name an Admin typed for the Team mention or the Destination''s entry, 1 to 64
+            letters, digits, `.`, `_` and `-` starting with a letter or a digit, which the bridge maps to its
+            messenger''s group; for everyone in the chat, the symbolic name: `channel`, `here`, `all` or `everyone`.'
         display_name:
           type: string
           minLength: 1
           maxLength: 200
+          description: The name the marker shows; for a group its name and for everyone in the chat its symbolic
+            name, as `external_id`.
     Link:
       type: object
       required:
