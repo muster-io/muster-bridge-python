@@ -78,7 +78,7 @@ from muster_bridge.store import (
     UnknownCursorError,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "AcknowledgedNotification",

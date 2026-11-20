@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/muster-io/muster-bridge-python/compare/v0.1.1...v0.1.2) (2026-11-20)
+
+
+### Features
+
+* declare group mentions and mentions of everyone, and pass the kind of a mention ([#31](https://github.com/muster-io/muster-bridge-python/issues/31)) ([91fe6bb](https://github.com/muster-io/muster-bridge-python/commit/91fe6bb062d4542117f72329f223050b747176ff))
+* support the gateway role with send_notification and notification_acknowledged ([#33](https://github.com/muster-io/muster-bridge-python/issues/33)) ([e96035c](https://github.com/muster-io/muster-bridge-python/commit/e96035cc0a4a205ea25e0f9337ebf0ac70085246))
+
 ## [0.1.1](https://github.com/muster-io/muster-bridge-python/compare/v0.1.0...v0.1.1) (2026-11-06)
 
 
