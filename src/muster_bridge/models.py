@@ -598,14 +598,14 @@ class Layout(BaseModel):
     )
     notices: list[str] = Field(
         ...,
-        description='The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line.',
+        description='The notices that apply, such as "Reopened ×2", then the footer — who snoozed or resolved the Alert Group, or why it resolved — each as a line. Who acknowledged it is `owner`, not a line, and "Escalation chains stopped" after an acknowledgement that stopped them is the last line; the Assignees are `assignees`, not a line.',
     )
     assignees: list[LayoutPerson] = Field(
         ...,
-        description="The people Paged for the Alert Group, before an acknowledgement; empty until Muster Pages people through Escalation chains.",
+        description="The Assignees, the people the Escalation chains Paged last and reached, each with the owning Team of their chain in `team` where it has one, before an acknowledgement; empty until Muster Pages people through Escalation chains.",
     )
     owner: LayoutPerson | None = Field(
-        ..., description="Who acknowledged the Alert Group, while it is acknowledged; null otherwise."
+        ..., description="Who acknowledged the Alert Group, without a Team, while it is acknowledged; null otherwise."
     )
     links: list[LayoutLink] = Field(..., description='The links, "Open in Muster" to the Alert Group page first.')
 
